@@ -28,12 +28,13 @@ Its run as `./eskb_doc_vac <command>` we will review these commands in order of 
 help
 ----
 
-Lists all available commands and if a command is additionally give it will show more infomation on that command
+Lists all available commands and if a command-name is additionally given it will show more infomation on that command
 
 e.g.
 
 ```
 ./eskb_doc_vac help
+./eskb_doc_vac help config
 ```
 
 config
@@ -66,13 +67,13 @@ Performs all the follwing setup steps in one go.
 
 e.g.
 ```
-./eskb_doc_vac setup_all kb_bsi_grundschutz
+./eskb_doc_vac setup_all kb_bsi
 ```
 
 setup_inference
 ---------------
 
-Assuming you have the E5 small model deployed, this will create the inference instance.
+This will create the inference instance, possibly triggering a model download if needed.
 
 setup_ingest
 ------------
@@ -92,10 +93,12 @@ Read a PDF file (name give in second argument) into the knowledgebase index
 
 e.g.
 ```
-./eskb_doc_vac read_pdf kb_bsi_grundschutz ~/Downloads/IT_Grundschutz_Kompendium_Edition2023.pdf
+./eskb_doc_vac read_pdf kb_bsi ~/Downloads/IT_Grundschutz_Kompendium_Edition2023.pdf
 ```
 
-That's it! Once read in you can add the index as a knowledgebase to either assistants, or play with it in the playground (TODO more detail guidance)
+That's it! Once read in you can add the index as a knowledgebase to either assistant (Obervability or Security), alternatively you can play with it in the playground.
+
+Playground: In kibana from the hamburger button navigate to Search -> Playground. There select your LLM connector and the index you created with this script (e.g. `kb_bsi`).
 
 ---
 
