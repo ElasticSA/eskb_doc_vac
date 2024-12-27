@@ -5,12 +5,12 @@
 # License: LGPL 2.1 or any minor 2.x version there above
 #
 
-SHNAME=$(basename $0)
+SHNAME=$(basename "$0")
 
 CONFIG=${ESKB_CONFIG:-_$SHNAME.config}
 
-ESPL_NAME="$SHNAME"
-ESINF_NAME="es-e5-model"
+ESPL_NAME="$SHNAME-pipeline"
+ESINF_NAME="$SHNAME-e5-model"
 
 REQUIRED_TOOLS="curl pdftk jq sed cut grep"
 
@@ -194,7 +194,7 @@ do_setup_index() {
       },
       "content": {
         "type": "semantic_text",
-        "inference_id": "$ESINF_NAMEl"
+        "inference_id": "$ESINF_NAME"
       }
     }
   }
@@ -213,12 +213,12 @@ _EOM_
 do_setup_all() {
     do_setup_inference
     do_setup_ingest
-    do_setup_index $1
+    do_setup_index "$@"
 }
 
 
 #############################################################################
-## Remove _any_ index, including kb indices created by this script
+## Remove _any_ named index, including kb indices created by this script
 ## Usage: ... remove_index <Index_Name>
 do_remove_index() {
     ES=$(get_es_url)
@@ -263,7 +263,7 @@ do_remove_inference() {
 do_remove_all() {
     confirm_remove everything
 
-    do_remove_index $1
+    do_remove_index "$@"
     do_remove_ingest
     do_remove_inference
 }
@@ -273,11 +273,11 @@ do_remove_all() {
 ## Usage: ... read1_pdf <Index_Name> <File_Name>
 do_read1_pdf() {
     ES=$(get_es_url)
-    IDX=${1?Index name required. See: $0 help read_pdf}
-    PDF=${2?PDF file name required. See: $0 help read_pdf}
+    IDX=${1?Index name required. See: $0 help read1_pdf}
+    PDF=${2?PDF file name required. See: $0 help read1_pdf}
     echo "Read file '$PDF' into '$IDX' on: $ES"
 
-    PDF_NAME=$(basename $PDF)
+    PDF_NAME=$(basename "$PDF")
     PAGE_COUNT=$(pdftk "$PDF" dump_data | grep NumberOfPages | cut -d' ' -f2 )
     BOOKMARKS=$(pdftk "$PDF" dump_data_utf8 | grep -E 'BookmarkTitle|BookmarkPageNumber')
 
@@ -287,7 +287,7 @@ do_read1_pdf() {
 
         PAGE_BOOKMARKS=$(sed -n "/^BookmarkPageNumber: $PAGE$/{x;s/^BookmarkTitle: //;p;d;}; x"<<<"$BOOKMARKS" | jq -R . | jq -s .)
 
-        echo " - Page: $PAGE - Size: $(wc -c <<<$PAGE_DATA)"
+        echo " - Page: $PAGE - Size: $(wc -c <<<"$PAGE_DATA")"
 
         curl -sK "$CONFIG" -X POST "$ES/$IDX/_doc?pipeline=$ESPL_NAME" -d@- <<_EOM_ | jq
 {
@@ -312,7 +312,12 @@ _EOM_
 ## Usage: ... read_pdf <Index_Name> <File_Name> [File_Name...]
 ## e.g.: ... read_pdf kb_index *.pdf
 do_read_pdf() {
-    local IDX=$1
+    if [ $# -lt 2 ]; then
+        echo "Require an index name and at least one or more files"
+        exit 1
+    fi
+
+    local IDX=${1?Index name required. See: $0 help read_pdf}
     while shift; do
         do_read1_pdf "$IDX" "$1"
     done
@@ -338,7 +343,7 @@ confirm_remove() {
     fi
 
     # Prompt for confirmation
-    read -p "Please confirm removal ($1) [y/n]: " response
+    read -rp "Please confirm removal ($1) [y/n]: " response
     case "$response" in
     [Yy]*)
         # Setting the variable to avoids all future prompts
