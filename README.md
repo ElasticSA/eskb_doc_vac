@@ -17,6 +17,8 @@ Prerequisits
    - curl, jq, pdftk, sed, grep
  - One or more PDF files you'd like to ask questions about or be used to correctly guide your analysts
 
+----
+
 Usage
 =====
 
@@ -95,12 +97,49 @@ e.g.
 
 That's it! Once read in you can add the index as a knowledgebase to either assistants, or play with it in the playground (TODO more detail guidance)
 
+---
+
 Under the hood
 ==============
+
+ES document schema
+------------------
+
+ - page:
+   - number
+   - content - The actual page text
+   - bookmarks - A list of bookmarks pointing to this page
+ - document:
+   - format - Currently just PDF
+   - filename - Base filename
+   - pages - Total number of pages
+ - content - Semantic text search field
+
+The index schema is created in do_setup_index() of the script
+
+ES ingest pipeline
+------------------
+
+Expects the following original doc input fields:
+ - _data - Base64 encoded pdf page (binary) content, from which text will be extracted
+ - _number - Page number
+ - _bookmarks - Page bookmark list
+ - document.*
+
+The pipeline will take _data, _number, & _bookmarks and create the page.* object.
+It will then populate the 'content' semantic search field.
+
+This pipeline is created in do_setup_ingest() of the script
+
+
+Inside the script
+-----------------
 
 The script eskb_doc_vac is inteded to be fairly self documenting, if you can read and use
 curl commands, you can read the script and follow along. Each command is a function called
 'do_`command`' and none are that long or complicated, bar the embeeded json documents.
+
+----
 
 Acknowledgements
 ================
