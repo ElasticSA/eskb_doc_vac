@@ -95,7 +95,7 @@ do_setup_ingest() {
 
     curl -sK "$CONFIG" -X PUT "$ES/_ingest/pipeline/$ESPL_NAME" -d@- <<_EOM_ | jq
 {
-    "description": "Ingest pipeline created by file data visualizer",
+    "description": "Ingest pipeline by $SHNAME",
     "processors": [
         {
             "attachment": {
