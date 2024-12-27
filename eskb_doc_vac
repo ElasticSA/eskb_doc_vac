@@ -1,0 +1,332 @@
+#!/bin/bash
+
+SHNAME=$(basename $0)
+CONFIG=${ESKB_CONFIG:-_$SHNAME.config}
+
+#############################################################################
+## Generate a configuration to connect to Elasticsearch in the current directory
+## Usage: ... config [es_url] [username] [password]
+## ^ Any parameter not given will need to be set manually by editing the generated config file
+## You can override the config file location by setting ESKB_CONFIG
+do_config() {
+    if [ $# -lt 4 ]; then
+        echo "Generating configuration in '$CONFIG' - with given parameters"
+        ESURL=${1:-ES_URL_UNSET}
+        ESUN=${2:-USERNAME_UNSET}
+        ESPW=${3:-PASSWORD_UNSET}
+
+        cat >"$CONFIG" <<_EOM_
+#es_url "$ESURL"
+user "$ESUN:$ESPW"
+header "Accept: application/json"
+header "Content-Type: application/json"
+_EOM_
+
+    echo "Configuration generated in '$CONFIG'."
+
+    else
+        echo "Usage: $0 config [es_url] [username] [password]"
+        echo "  - es_url: URL of the Elasticsearch instance"
+        echo "  - username: Username for authentication"
+        echo "  - password: Password for authentication"
+        echo
+        echo "Current config file location: $CONFIG"
+    fi
+}
+
+#############################################################################
+## Test the configuration is correct and that we can connect to Elasticsearch
+do_ping() {
+    ES=$(get_es_url)
+    echo "Ping/Connection test!"
+    echo "Trying to get health from: $ES"
+
+    curl -sK "$CONFIG" --fail-with-body "$ES/" | jq || {
+        echo "Error: curl failed to connect to Elasticsearch. Check configuration: '$CONFIG'" >&2
+        return 1
+    }
+
+}
+
+#############################################################################
+## Setup the ML inferencing model for data ingest
+do_setup_inference() {
+    #TODO d/l and deply ML model?
+
+    ES=$(get_es_url)
+    echo "Setup inference model on: $ES"
+
+    # Test if inference already exists
+    curl -sK "$CONFIG" --fail-with-body "$ES/_inference/text_embedding/es-e5-model" >/dev/null
+
+    if [ "$?" = "0" ]; then
+        echo "WARN: Inference 'es-e5-model' already exists - doing nothing"
+    else
+
+         curl -sK "$CONFIG" -X PUT "$ES/_inference/text_embedding/es-e5-model" -d@- <<_EOM_ | jq
+{
+  "service": "elasticsearch",
+  "service_settings": {
+    "num_allocations": 1,
+    "num_threads": 1,
+    "model_id": ".multilingual-e5-small"
+  }
+}
+_EOM_
+
+    fi
+}
+
+#############################################################################
+## Setup the ingest pipeline to process read documents
+do_setup_ingest() {
+    ES=$(get_es_url)
+    echo "Setup ingest pipeline on: $ES"
+
+    curl -sK "$CONFIG" -X PUT "$ES/_ingest/pipeline/$SHNAME" -d@- <<_EOM_ | jq
+{
+    "description": "Ingest pipeline created by file data visualizer",
+    "processors": [
+        {
+            "attachment": {
+                "field": "_data",
+                "target_field": "page",
+                "remove_binary": true,
+                "indexed_chars": -1
+            }
+        },
+        {
+            "rename": {
+                "field": "_number",
+                "target_field": "page.number"
+            }
+        },
+        {
+            "rename": {
+                "field": "_bookmarks",
+                "target_field": "page.bookmarks"
+            }
+        },
+        {
+            "set": {
+                "field": "content",
+                "copy_from": "page.content"
+            }
+        }
+    ]
+}
+_EOM_
+
+}
+
+#############################################################################
+## Setup the index to hold read documents
+## Usage: ... setup_index <Index_Name>
+do_setup_index() {
+    ES=$(get_es_url)
+    IDX=${1?Index name required. See: $0 help setup_index}
+    echo "Setup index '$IDX' on: $ES"
+
+    # Test if index already exists
+    curl -sK "$CONFIG" --fail-with-body -I "$ES/$IDX" >/dev/null
+
+    if [ "$?" = "0" ]; then
+        echo "WARN: Index '$IDX' already exists - doing nothing"
+    else
+
+        curl -sK "$CONFIG" -X PUT "$ES/$IDX" -d@- <<_EOM_ | jq
+{
+  "settings": {
+    "index": {
+      "routing": {
+        "allocation": {
+          "include": {
+            "_tier_preference": "data_content"
+          }
+        }
+      },
+      "default_pipeline": "$SHNAME",
+      "number_of_shards": "1",
+      "number_of_replicas": "1"
+    }
+  },
+  "mappings": {
+    "properties": {
+      "page": {
+        "properties": {
+          "content": {
+            "type": "text"
+          },
+          "number": {
+            "type": "long"
+          },
+          "bookmarks": {
+            "type": "wildcard",
+            "ignore_above": 256
+          }
+        }
+      },
+      "document": {
+        "properties": {
+          "format": {
+            "type": "keyword",
+            "ignore_above": 128
+          },
+          "filename": {
+            "type": "wildcard",
+            "ignore_above": 256
+          },
+          "pages": {
+            "type": "long"
+          }
+        }
+      },
+      "content": {
+        "type": "semantic_text",
+        "inference_id": "es-e5-model"
+      }
+    }
+  }
+}
+_EOM_
+
+    fi
+}
+
+#############################################################################
+## Runs all the setup sets in one go:
+##  - setup_inference
+##  - setup_ingest
+##  - setup_index
+## Usage: ... setup_all <Index_Name>
+do_setup_all() {
+    do_setup_inference
+    do_setup_ingest
+    do_setup_index $1
+}
+
+#############################################################################
+## Reads PDF file (File_Name) and adds each pages as its own doc to the index (Index_Name)
+## Usage: ... read_1pdf <Index_Name> <File_Name>
+do_read1_pdf() {
+    ES=$(get_es_url)
+    IDX=${1?Index name required. See: $0 help read_pdf}
+    PDF=${2?PDF file name required. See: $0 help read_pdf}
+    echo "Read file '$PDF' into '$IDX' on: $ES"
+
+    PDF_NAME=$(basename $PDF)
+    PAGE_COUNT=$(pdftk "$PDF" dump_data | grep NumberOfPages | cut -d' ' -f2 )
+    BOOKMARKS=$(pdftk "$PDF" dump_data_utf8 | grep -E 'BookmarkTitle|BookmarkPageNumber')
+
+    for PAGE in $(seq 1 "$PAGE_COUNT"); do
+
+        PAGE_DATA=$(pdftk "$PDF" cat "$PAGE" output - | base64)
+
+        PAGE_BOOKMARKS=$(sed -n "/^BookmarkPageNumber: $PAGE$/{x;s/^BookmarkTitle: //;p;d;}; x"<<<"$BOOKMARKS" | jq -R . | jq -s .)
+
+        echo " - Page: $PAGE - Size: $(wc -c <<<$PAGE_DATA)"
+
+        curl -sK "$CONFIG" -X POST "$ES/$IDX/_doc?pipeline=$SHNAME" -d@- <<_EOM_ | jq
+{
+    "_data": "$PAGE_DATA",
+    "_number": "$PAGE",
+    "_bookmarks": $PAGE_BOOKMARKS,
+    "document": {
+        "type": "PDF",
+        "filename": "$PDF_NAME",
+        "pages": $PAGE_COUNT
+    }
+}
+_EOM_
+
+    done
+
+    echo "All pages read in"
+}
+
+#############################################################################
+## Iterates over all given PDF files, calling do_read1_pdf on each
+## Usage: ... read_pdf <Index_Name> <File_Name> [File_Name...]
+## e.g.: ... read_pdf kb_index *.pdf
+do_read_pdf() {
+    local IDX=$1
+    while shift; do
+        do_read1_pdf "$IDX" "$1"
+    done
+}
+
+########### Utilities ##############
+
+get_es_url() {
+    if [ ! -f "$CONFIG" ]; then
+        echo "Error: Configuration file '$CONFIG' not found. Please generate it first using the 'config' command." >&2
+        return 1
+    fi
+
+#     sed -Ene 's/#(es_)?url // p' < $CONFIG | tr -d '"'
+# /\ Mine  vs. \/ GenAI
+    grep -E '^#es_url' "$CONFIG" | cut -d'"' -f2
+}
+
+########### Boiler plate stuff from here down #############
+# You can reuse this in other bash scripts, nothing specific here
+
+## Shows available commands and their descriptions.
+do_help() {
+    if [ $# -eq 0 ]; then
+        echo "Available commands:"
+        # List all functions that start with do_ as a command
+        for func in $(declare -F | cut -d' ' -f3 | grep '^do_'); do
+            echo " - ${func#do_}"
+        done
+        echo
+        echo "Use '$0 help <command>' to get more information"
+
+    elif [ $# -eq 1 ]; then
+        command="do_$1"
+        if declare -F "$command" > /dev/null; then
+            echo "##### Showing help for: '$1' #####"
+            # Use sed to extract all '##' comments above the function definition (Yes GenAI helped)
+            sed -n '
+            /^##[^#]/{
+                H
+                d
+            }
+            /^\s*}/{
+                x
+                s/.*//
+                h
+            }
+            /^'"$command"' *\(\)/{
+                x
+                s/^\n//
+                p
+                q
+            }
+            ' "$0"
+        else
+            echo "Error: Command '$1' not found."
+        fi
+    else
+        echo "Usage: $0 help [command]"
+    fi
+}
+
+# Main script
+if [ $# -eq 0 ]; then
+    echo "Usage: $0 <command> [args]"
+    echo "To list available commands: $0 help"
+    exit 1
+fi
+
+command="do_$1"
+shift
+
+# Check if the function exists
+if declare -F "$command" > /dev/null; then
+    $command "$@"
+else
+    echo "Error: Command '$1' not found. Calling '$0 help' instead:-"
+    do_help
+    exit 1
+fi
