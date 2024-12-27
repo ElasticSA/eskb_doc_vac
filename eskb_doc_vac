@@ -9,6 +9,8 @@ SHNAME=$(basename $0)
 
 CONFIG=${ESKB_CONFIG:-_$SHNAME.config}
 
+ESPL_NAME="$SHNAME"
+
 REQUIRED_TOOLS="curl pdftk jq sed cut grep"
 
 #############################################################################
@@ -91,7 +93,7 @@ do_setup_ingest() {
     ES=$(get_es_url)
     echo "Setup ingest pipeline on: $ES"
 
-    curl -sK "$CONFIG" -X PUT "$ES/_ingest/pipeline/$SHNAME" -d@- <<_EOM_ | jq
+    curl -sK "$CONFIG" -X PUT "$ES/_ingest/pipeline/$ESPL_NAME" -d@- <<_EOM_ | jq
 {
     "description": "Ingest pipeline created by file data visualizer",
     "processors": [
@@ -153,7 +155,7 @@ do_setup_index() {
           }
         }
       },
-      "default_pipeline": "$SHNAME",
+      "default_pipeline": "$ESPL_NAME",
       "number_of_shards": "1",
       "number_of_replicas": "1"
     }
@@ -215,7 +217,7 @@ do_setup_all() {
 
 #############################################################################
 ## Reads PDF file (File_Name) and adds each pages as its own doc to the index (Index_Name)
-## Usage: ... read_1pdf <Index_Name> <File_Name>
+## Usage: ... read1_pdf <Index_Name> <File_Name>
 do_read1_pdf() {
     ES=$(get_es_url)
     IDX=${1?Index name required. See: $0 help read_pdf}
@@ -234,7 +236,7 @@ do_read1_pdf() {
 
         echo " - Page: $PAGE - Size: $(wc -c <<<$PAGE_DATA)"
 
-        curl -sK "$CONFIG" -X POST "$ES/$IDX/_doc?pipeline=$SHNAME" -d@- <<_EOM_ | jq
+        curl -sK "$CONFIG" -X POST "$ES/$IDX/_doc?pipeline=$ESPL_NAME" -d@- <<_EOM_ | jq
 {
     "_data": "$PAGE_DATA",
     "_number": "$PAGE",
