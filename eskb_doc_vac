@@ -1,6 +1,12 @@
 #!/bin/bash
+#
+# (C) 2024 Elasticsearch
+# Author: Thorben Jändling
+# License: LGPL 2.1 or any minor 2.x version there above
+#
 
 SHNAME=$(basename $0)
+
 CONFIG=${ESKB_CONFIG:-_$SHNAME.config}
 
 #############################################################################
