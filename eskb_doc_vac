@@ -9,6 +9,8 @@ SHNAME=$(basename $0)
 
 CONFIG=${ESKB_CONFIG:-_$SHNAME.config}
 
+REQUIRED_TOOLS="curl pdftk jq sed cut grep"
+
 #############################################################################
 ## Generate a configuration to connect to Elasticsearch in the current directory
 ## Usage: ... config [es_url] [username] [password]
@@ -45,7 +47,7 @@ _EOM_
 do_ping() {
     ES=$(get_es_url)
     echo "Ping/Connection test!"
-    echo "Trying to get health from: $ES"
+    echo "Trying to get cluster info from: $ES"
 
     curl -sK "$CONFIG" --fail-with-body "$ES/" | jq || {
         echo "Error: curl failed to connect to Elasticsearch. Check configuration: '$CONFIG'" >&2
@@ -319,6 +321,14 @@ do_help() {
 }
 
 # Main script
+
+for cmd in $REQUIRED_TOOLS; do
+  if ! command -v "$cmd" &>/dev/null; then
+    echo "Needed tool '$cmd' not found, please install it."
+    exit 1
+  fi
+done
+
 if [ $# -eq 0 ]; then
     echo "Usage: $0 <command> [args]"
     echo "To list available commands: $0 help"
