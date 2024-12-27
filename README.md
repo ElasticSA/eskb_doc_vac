@@ -137,7 +137,7 @@ Inside the script
 
 The script eskb_doc_vac is inteded to be fairly self documenting, if you can read and use
 curl commands, you can read the script and follow along. Each command is a function called
-'do_`command`' and none are that long or complicated, bar the embeeded json documents.
+'do_`command`' and none are that long or complicated, bar the embedded json documents.
 
 ----
 

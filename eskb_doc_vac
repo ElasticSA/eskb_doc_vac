@@ -10,6 +10,7 @@ SHNAME=$(basename $0)
 CONFIG=${ESKB_CONFIG:-_$SHNAME.config}
 
 ESPL_NAME="$SHNAME"
+ESINF_NAME="es-e5-model"
 
 REQUIRED_TOOLS="curl pdftk jq sed cut grep"
 
@@ -67,13 +68,13 @@ do_setup_inference() {
     echo "Setup inference model on: $ES"
 
     # Test if inference already exists
-    curl -sK "$CONFIG" --fail-with-body "$ES/_inference/text_embedding/es-e5-model" >/dev/null
+    curl -sK "$CONFIG" --fail-with-body "$ES/_inference/text_embedding/$ESINF_NAME" >/dev/null
 
     if [ "$?" = "0" ]; then
-        echo "WARN: Inference 'es-e5-model' already exists - doing nothing"
+        echo "WARN: Inference '$ESINF_NAME' already exists - doing nothing"
     else
 
-         curl -sK "$CONFIG" -X PUT "$ES/_inference/text_embedding/es-e5-model" -d@- <<_EOM_ | jq
+         curl -sK "$CONFIG" -X PUT "$ES/_inference/text_embedding/$ESINF_NAME" -d@- <<_EOM_ | jq
 {
   "service": "elasticsearch",
   "service_settings": {
@@ -193,7 +194,7 @@ do_setup_index() {
       },
       "content": {
         "type": "semantic_text",
-        "inference_id": "es-e5-model"
+        "inference_id": "$ESINF_NAMEl"
       }
     }
   }
@@ -204,7 +205,7 @@ _EOM_
 }
 
 #############################################################################
-## Runs all the setup sets in one go:
+## Runs all the setup steps in one go:
 ##  - setup_inference
 ##  - setup_ingest
 ##  - setup_index
@@ -213,6 +214,58 @@ do_setup_all() {
     do_setup_inference
     do_setup_ingest
     do_setup_index $1
+}
+
+
+#############################################################################
+## Remove _any_ index, including kb indices created by this script
+## Usage: ... remove_index <Index_Name>
+do_remove_index() {
+    ES=$(get_es_url)
+    IDX=${1?Index name required. See: $0 help setup_index}
+    echo "Remove index '$IDX' on: $ES"
+
+    confirm_remove index
+
+    curl -sK "$CONFIG" -X DELETE "$ES/$IDX" | jq
+}
+
+#############################################################################
+## Remove the ingest pipeline
+## Usage: ... remove_ingest
+do_remove_ingest() {
+    ES=$(get_es_url)
+    echo "Remove ingest pipeline on: $ES"
+
+    confirm_remove ingest
+
+    curl -sK "$CONFIG" -X DELETE "$ES/_ingest/pipeline/$ESPL_NAME" | jq
+}
+
+#############################################################################
+## Remove the inference
+## Usage: ... remove_inference
+do_remove_inference() {
+    ES=$(get_es_url)
+    echo "Remove inference on: $ES"
+
+    confirm_remove inference
+
+    curl -sK "$CONFIG" -X DELETE "$ES/_inference/text_embedding/$ESINF_NAME" | jq
+}
+
+#############################################################################
+## Runs all the remove steps in one go:
+##  - remove_index
+##  - remove_ingest
+##  - remove_inference
+## Usage: ... remove_all <Index_Name>
+do_remove_all() {
+    confirm_remove everything
+
+    do_remove_index $1
+    do_remove_ingest
+    do_remove_inference
 }
 
 #############################################################################
@@ -276,6 +329,26 @@ get_es_url() {
 #     sed -Ene 's/#(es_)?url // p' < $CONFIG | tr -d '"'
 # /\ Mine  vs. \/ GenAI
     grep -E '^#es_url' "$CONFIG" | cut -d'"' -f2
+}
+
+confirm_remove() {
+    # If ESKB_CONFIRM_REMOVE is already 'y', return immediately
+    if [[ "${ESKB_CONFIRM_REMOVE}" == "y" ]]; then
+        return
+    fi
+
+    # Prompt for confirmation
+    read -p "Please confirm removal ($1) [y/n]: " response
+    case "$response" in
+    [Yy]*)
+        # Setting the variable to avoids all future prompts
+        export ESKB_CONFIRM_REMOVE="y"
+        ;;
+    *)
+        echo "Removal cancelled by user."
+        exit 1
+        ;;
+    esac
 }
 
 ########### Boiler plate stuff from here down #############
