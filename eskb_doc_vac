@@ -12,6 +12,8 @@ CONFIG=${ESKB_CONFIG:-_$SHNAME.config}
 ESPL_NAME="$SHNAME-pipeline"
 ESINF_NAME="$SHNAME-e5-model"
 
+ML_MAX_ALLOC=${ESKB_ML_MAX_ALLOC:-2}
+
 REQUIRED_TOOLS="curl pdftk jq sed cut grep"
 
 #############################################################################
@@ -61,9 +63,10 @@ do_ping() {
 
 #############################################################################
 ## Setup the ML inferencing model for data ingest
+## This will:
+##  - Detect the cluster system architecture and select the model accordingly
+##  - Use adaptive allocation, normally set to min. 1 and max of 2 (override with envvar: ESKB_ML_MAX_ALLOC)
 do_setup_inference() {
-    #TODO d/l and deply ML model?
-
     ES=$(get_es_url)
     echo "Setup inference model on: $ES"
 
@@ -77,19 +80,24 @@ do_setup_inference() {
         # Detect the system architecture, and select model accordingly
         ES_ARCH=$(curl -sK "$CONFIG" -X GET "$ES/_nodes/_all" | jq -r '.nodes | to_entries[0].value.os.arch')
         if grep -qiE '^(amd64|x86[-_]64)$' <<<"$ES_ARCH"; then
-            MODEL=".multilingual-e5-small_linux-x86_64"
+            ML_MODEL=".multilingual-e5-small_linux-x86_64"
         else
-            MODEL=".multilingual-e5-small"
+            ML_MODEL=".multilingual-e5-small"
         fi
 
+        # This will trigger an attempt to fetch the model, if not already installed
          curl -sK "$CONFIG" -X PUT "$ES/_inference/text_embedding/$ESINF_NAME" -d@- <<_EOM_ | jq
 {
-  "service": "elasticsearch",
-  "service_settings": {
-    "num_allocations": 1,
-    "num_threads": 1,
-    "model_id": "$MODEL"
-  }
+    "service": "elasticsearch",
+    "service_settings": {
+        "adaptive_allocations": {
+            "enabled": true,
+            "min_number_of_allocations": 1,
+            "max_number_of_allocations": $ML_MAX_ALLOC
+        },
+        "num_threads": 2,
+        "model_id": "$ML_MODEL"
+    }
 }
 _EOM_
 
