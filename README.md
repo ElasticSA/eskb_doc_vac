@@ -1,4 +1,4 @@
-Elasticsearch AI assistant knowledgebase creator (vacuum)
+Vacuum documents into an Elasticsearch AI assistant knowledgebase
 =========================================================
 
 This project is to simplify the creation of knowledgebase indices for the AI assistants
@@ -12,9 +12,9 @@ Prerequisits
 ============
 
  - The Elastic Stack (In cloud or on-prem) with at least 8GB of ML node capacity available
- - Install and deploy the E5 model [TODO Link]
+   - This script will try to deploy elastics e5 model [https://www.elastic.co/guide/en/machine-learning/current/ml-nlp-e5.html]
  - MacOS or Linux to run the bash script with the following tools installed
-   - curl, jq, pdftk, sed, grep
+   - curl, jq, pdftk, sed, grep, cut, etc...
  - One or more PDF files you'd like to ask questions about or be used to correctly guide your analysts
 
 ----

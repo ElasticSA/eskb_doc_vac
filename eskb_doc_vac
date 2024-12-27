@@ -74,13 +74,21 @@ do_setup_inference() {
         echo "WARN: Inference '$ESINF_NAME' already exists - doing nothing"
     else
 
+        # Detect the system architecture, and select model accordingly
+        ES_ARCH=$(curl -sK "$CONFIG" -X GET "$ES/_nodes/_all" | jq -r '.nodes | to_entries[0].value.os.arch')
+        if grep -qiE '^(amd64|x86[-_]64)$' <<<"$ES_ARCH"; then
+            MODEL=".multilingual-e5-small_linux-x86_64"
+        else
+            MODEL=".multilingual-e5-small"
+        fi
+
          curl -sK "$CONFIG" -X PUT "$ES/_inference/text_embedding/$ESINF_NAME" -d@- <<_EOM_ | jq
 {
   "service": "elasticsearch",
   "service_settings": {
     "num_allocations": 1,
     "num_threads": 1,
-    "model_id": ".multilingual-e5-small"
+    "model_id": "$MODEL"
   }
 }
 _EOM_
