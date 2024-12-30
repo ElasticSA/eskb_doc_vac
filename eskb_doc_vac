@@ -377,8 +377,9 @@ do_read_pdf() {
     fi
 
     local IDX=${1?Index name required. See: $0 help read_pdf}
-    while shift; do
-        do_read1_pdf "$IDX" "$1"
+    shift
+    for F in "$@"; do
+        do_read1_pdf "$IDX" "$F"
     done
 }
 
@@ -432,6 +433,7 @@ _read_pdf_by_bookmark() {
     PDF_NAME=$(basename "$PDF")
     echo "Read file '$PDF_NAME' into '$IDX' using Bookmark $BKL on: $ES"
 
+    PAGE_COUNT=$(pdftk "$PDF" dump_data | grep NumberOfPages | cut -d' ' -f2 )
     BOOKMARKS=$(pdftk "$PDF" dump_data_utf8 | grep -E 'BookmarkBegin|BookmarkTitle|BookmarkLevel|BookmarkPageNumber')
 
     FROM_PAGE=1
@@ -465,7 +467,7 @@ _read_pdf_by_bookmark() {
     fi
 
     # Ingest the final range
-    _ingest_pages "$FROM_PAGE" "end" "$BM_TITLE"
+    _ingest_pages "$FROM_PAGE" "$PAGE_COUNT" "$BM_TITLE"
 }
 
 _ingest_pages() {
