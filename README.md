@@ -11,7 +11,7 @@ The two example used throughout this document will be:
  **(A)** The "IT-Grundschutz-Kompendium – Werkzeug für Informationssicherheit" from the German BSI.
  An 800+ page PDF of IT guidelines; [https://www.bsi.bund.de/DE/Themen/Unternehmen-und-Organisationen/Standards-und-Zertifizierung/IT-Grundschutz/IT-Grundschutz-Kompendium/it-grundschutz-kompendium_node.html]
 
- **(B)** The "T-Grundschutz-Bausteine" - Broken down to multiple PDFs files in one zip download
+ **(B)** The "IT-Grundschutz-Bausteine" - Broken down to multiple PDFs files in one zip download
  [https://www.bsi.bund.de/SharedDocs/Downloads/DE/BSI/Grundschutz/IT-GS-Kompendium_Einzel_PDFs_2023/Zip_Datei_Edition_2023.html]
 
 Prerequisits
@@ -116,7 +116,7 @@ The file will be read in one excerpt at a time, each excerpt becoming its own El
 There are three excerpt strategies:
 
  - whole - Excerpt is the whole document
- - page - Excerpts are each page in tern
+ - page - Excerpts are each page in turn
  - bookmark1 - Excerpt are all pages between Level 1 Bookmarks (default)
 
  The bookmark1 strategy follows a document structure splitting approach that would give best results if
