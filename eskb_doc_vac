@@ -9,18 +9,26 @@ SHNAME=$(basename "$0")
 
 CONFIG=${ESKB_CONFIG:-_$SHNAME.config}
 
-ESPL_NAME="$SHNAME-pipeline"
-ESINF_NAME="$SHNAME-e5-model"
+# ESPL_NAME="$SHNAME-pipeline"
+# ESINF_NAME="$SHNAME-e5-model"
 
 ML_MAX_ALLOC=${ESKB_ML_MAX_ALLOC:-2}
 
-REQUIRED_TOOLS="curl pdftk jq sed cut grep"
+REQUIRED_TOOLS="curl pdftk jq sed awk cut grep"
 
 #############################################################################
 ## Generate a configuration to connect to Elasticsearch in the current directory
 ## Usage: ... config [es_url] [username] [password]
 ## ^ Any parameter not given will need to be set manually by editing the generated config file
 ## You can override the config file location by setting ESKB_CONFIG
+##
+## The file format is a curl config file, but with custom settings prefixed with # so that curl ignores them
+##
+## Key entries:
+##  #es_url - Elasticsearch URL
+##  #strategy - Excerpt strategy: How to divide (chunk) large PDFs: whole, page, bookmark1
+##  user - curl User:PW config option
+##  header - headers curl should send, please leave untouched
 do_config() {
     if [ $# -lt 4 ]; then
         echo "Generating configuration in '$CONFIG' - with given parameters"
@@ -30,6 +38,10 @@ do_config() {
 
         cat >"$CONFIG" <<_EOM_
 #es_url "$ESURL"
+#strategy "bookmark1"
+#es_inference_name "$SHNAME-e5-model"
+#es_pipeline_name "$SHNAME-pipeline"
+#es_ml_max_alloc "2"
 user "$ESUN:$ESPW"
 header "Accept: application/json"
 header "Content-Type: application/json"
@@ -50,8 +62,8 @@ _EOM_
 #############################################################################
 ## Test the configuration is correct and that we can connect to Elasticsearch
 do_ping() {
-    ES=$(get_es_url)
-    echo "Ping/Connection test!"
+    ES=$(get_conf es_url)
+    echo "Ping/Connection test - Using config: $CONFIG"
     echo "Trying to get cluster info from: $ES"
 
     curl -sK "$CONFIG" --fail-with-body "$ES/" | jq || {
@@ -68,8 +80,10 @@ do_ping() {
 ##  - Detect ML node virtual processors and set threads to half that
 ##  - Use adaptive allocation, normally set to min. 1 and max of 2 (override with envvar: ESKB_ML_MAX_ALLOC)
 do_setup_inference() {
-    ES=$(get_es_url)
-    echo "Setup inference model on: $ES"
+    ES=$(get_conf es_url)
+
+    ESINF_NAME=$(get_conf es_inference_name)
+    echo "Setup inference model '$ESINF_NAME' on: $ES"
 
     # Test if inference already exists
     curl -sK "$CONFIG" --fail-with-body "$ES/_inference/text_embedding/$ESINF_NAME" >/dev/null
@@ -126,8 +140,9 @@ _EOM_
 #############################################################################
 ## Setup the ingest pipeline to process read documents
 do_setup_ingest() {
-    ES=$(get_es_url)
-    echo "Setup ingest pipeline on: $ES"
+    ES=$(get_conf es_url)
+    ESPL_NAME=$(get_conf es_pipeline_name)
+    echo "Setup ingest pipeline '$ESPL_NAME' on: $ES"
 
     curl -sK "$CONFIG" -X PUT "$ES/_ingest/pipeline/$ESPL_NAME" -d@- <<_EOM_ | jq
 {
@@ -136,27 +151,39 @@ do_setup_ingest() {
         {
             "attachment": {
                 "field": "_data",
-                "target_field": "page",
+                "target_field": "excerpt",
                 "remove_binary": true,
                 "indexed_chars": -1
             }
         },
         {
             "rename": {
-                "field": "_number",
-                "target_field": "page.number"
+                "field": "_from",
+                "target_field": "excerpt.start_page"
+            }
+        },
+        {
+            "rename": {
+                "field": "_to",
+                "target_field": "excerpt.end_page"
+            }
+        },
+        {
+            "rename": {
+                "field": "_title",
+                "target_field": "excerpt.title"
             }
         },
         {
             "rename": {
                 "field": "_bookmarks",
-                "target_field": "page.bookmarks"
+                "target_field": "excerpt.bookmarks"
             }
         },
         {
             "set": {
                 "field": "content",
-                "copy_from": "page.content"
+                "copy_from": "excerpt.content"
             }
         }
     ]
@@ -169,7 +196,10 @@ _EOM_
 ## Setup the index to hold read documents
 ## Usage: ... setup_index <Index_Name>
 do_setup_index() {
-    ES=$(get_es_url)
+    ES=$(get_conf es_url)
+    ESPL_NAME=$(get_conf es_pipeline_name)
+    ESINF_NAME=$(get_conf es_inference_name)
+
     IDX=${1?Index name required. See: $0 help setup_index}
     echo "Setup index '$IDX' on: $ES"
 
@@ -199,13 +229,20 @@ do_setup_index() {
   },
   "mappings": {
     "properties": {
-      "page": {
+      "excerpt": {
         "properties": {
           "content": {
             "type": "text"
           },
-          "number": {
+          "start_page": {
             "type": "long"
+          },
+          "end_page": {
+            "type": "long"
+          },
+          "title": {
+            "type": "wildcard",
+            "ignore_above": 256
           },
           "bookmarks": {
             "type": "wildcard",
@@ -223,8 +260,9 @@ do_setup_index() {
             "type": "wildcard",
             "ignore_above": 256
           },
-          "pages": {
-            "type": "long"
+          "excerpt_strategy": {
+            "type": "keyword",
+            "ignore_above": 128
           }
         }
       },
@@ -256,7 +294,7 @@ do_setup_all() {
 ## Remove _any_ named index, including kb indices created by this script
 ## Usage: ... remove_index <Index_Name>
 do_remove_index() {
-    ES=$(get_es_url)
+    ES=$(get_conf es_url)
     IDX=${1?Index name required. See: $0 help setup_index}
     echo "Remove index '$IDX' on: $ES"
 
@@ -269,8 +307,9 @@ do_remove_index() {
 ## Remove the ingest pipeline
 ## Usage: ... remove_ingest
 do_remove_ingest() {
-    ES=$(get_es_url)
-    echo "Remove ingest pipeline on: $ES"
+    ES=$(get_conf es_url)
+    ESPL_NAME=$(get_conf es_pipeline_name)
+    echo "Remove ingest pipeline '$ESPL_NAME' on: $ES"
 
     confirm_remove ingest
 
@@ -281,8 +320,9 @@ do_remove_ingest() {
 ## Remove the inference
 ## Usage: ... remove_inference
 do_remove_inference() {
-    ES=$(get_es_url)
-    echo "Remove inference on: $ES"
+    ES=$(get_conf es_url)
+    ESINF_NAME=$(get_conf es_inference_name)
+    echo "Remove inference '$ESINF_NAME' on: $ES"
 
     confirm_remove inference
 
@@ -304,48 +344,32 @@ do_remove_all() {
 }
 
 #############################################################################
-## Reads PDF file (File_Name) and adds each pages as its own doc to the index (Index_Name)
+## Reads PDF file (File_Name) and adds each excerpt as its own doc to the index (Index_Name)
 ## Usage: ... read1_pdf <Index_Name> <File_Name>
 do_read1_pdf() {
-    ES=$(get_es_url)
-    IDX=${1?Index name required. See: $0 help read1_pdf}
-    PDF=${2?PDF file name required. See: $0 help read1_pdf}
-    echo "Read file '$PDF' into '$IDX' on: $ES"
+    STRATEGY=$(get_conf strategy)
+    ESPL_NAME=$(get_conf es_pipeline_name)
+    IDX=${1?Target index required. See $0 help read1_pdf}
+    PDF=${2?PDF file required. See $0 help read1_pdf}
 
-    PDF_NAME=$(basename "$PDF")
-    PAGE_COUNT=$(pdftk "$PDF" dump_data | grep NumberOfPages | cut -d' ' -f2 )
-    BOOKMARKS=$(pdftk "$PDF" dump_data_utf8 | grep -E 'BookmarkTitle|BookmarkPageNumber')
+    # Validate strategy
+    case "$STRATEGY" in
+        whole|page|bookmark*) ;;
+        *)
+            echo "ERROR: Invalid excerpt strategy: $STRATEGY"
+            exit 1
+            ;;
+    esac
 
-    for PAGE in $(seq 1 "$PAGE_COUNT"); do
+    _read_pdf_by_${STRATEGY%%[0-9]*}
 
-        PAGE_DATA=$(pdftk "$PDF" cat "$PAGE" output - | base64)
-
-        PAGE_BOOKMARKS=$(sed -n "/^BookmarkPageNumber: $PAGE$/{x;s/^BookmarkTitle: //;p;d;}; x"<<<"$BOOKMARKS" | jq -R . | jq -s .)
-
-        echo " - Page: $PAGE - Size: $(wc -c <<<"$PAGE_DATA")"
-
-        curl -sK "$CONFIG" -X POST "$ES/$IDX/_doc?pipeline=$ESPL_NAME" -d@- <<_EOM_ | jq
-{
-    "_data": "$PAGE_DATA",
-    "_number": "$PAGE",
-    "_bookmarks": $PAGE_BOOKMARKS,
-    "document": {
-        "type": "PDF",
-        "filename": "$PDF_NAME",
-        "pages": $PAGE_COUNT
-    }
-}
-_EOM_
-
-    done
-
-    echo "All pages read in"
 }
 
 #############################################################################
 ## Iterates over all given PDF files, calling do_read1_pdf on each
 ## Usage: ... read_pdf <Index_Name> <File_Name> [File_Name...]
 ## e.g.: ... read_pdf kb_index *.pdf
+## Note: Calls read1_pdf on each file (internally)
 do_read_pdf() {
     if [ $# -lt 2 ]; then
         echo "Require an index name and at least one or more files"
@@ -358,17 +382,161 @@ do_read_pdf() {
     done
 }
 
+########### PDF read strategies ###########
+
+# Please note: Breaking the PDF in a sensible way proved to be more complicated than first thought.
+# As such this section of the script gets a little more complicated than i wanted
+# Basically _read_pdf_by_* determine a FROM-TO page range for each excerpt
+# Then _ingest_pages is called to extract those pages and add the excerpt as an ES doc
+# We also use some awk-foo to work out all the bookmarks within that range
+
+# Note all these function will reuse variables that should be set in their caller
+
+_read_pdf_by_whole() {
+    ES=$(get_conf es_url)
+
+    PDF_NAME=$(basename "$PDF")
+    echo "Read file '$PDF_NAME' into '$IDX' as a whole document on: $ES"
+
+    BOOKMARKS=$(pdftk "$PDF" dump_data_utf8 | grep -E 'BookmarkBegin|BookmarkTitle|BookmarkLevel|BookmarkPageNumber')
+    PAGE_COUNT=$(pdftk "$PDF" dump_data | grep NumberOfPages | cut -d' ' -f2 )
+
+    _ingest_pages 1 "$PAGE_COUNT" "Whole entire document"
+}
+
+_read_pdf_by_page() {
+    ES=$(get_conf es_url)
+
+    PDF_NAME=$(basename "$PDF")
+    echo "Read file '$PDF_NAME' into '$IDX' using per page, on: $ES"
+
+    BOOKMARKS=$(pdftk "$PDF" dump_data_utf8 | grep -E 'BookmarkBegin|BookmarkTitle|BookmarkLevel|BookmarkPageNumber')
+    PAGE_COUNT=$(pdftk "$PDF" dump_data | grep NumberOfPages | cut -d' ' -f2 )
+
+    for PAGE in $(seq 1 "$PAGE_COUNT"); do
+        _ingest_pages $PAGE $PAGE "Page $PAGE of $PAGE_COUNT"
+    done
+}
+
+# ...
+# BookmarkBegin
+# BookmarkTitle: IT-Grundschutz - Basis für Informationssicherheit
+# BookmarkLevel: 1
+# BookmarkPageNumber: 17
+# BookmarkBegin
+# ...
+_read_pdf_by_bookmark() {
+    ES=$(get_conf es_url)
+    BKL=${STRATEGY#bookmark}
+
+    PDF_NAME=$(basename "$PDF")
+    echo "Read file '$PDF_NAME' into '$IDX' using Bookmark $BKL on: $ES"
+
+    BOOKMARKS=$(pdftk "$PDF" dump_data_utf8 | grep -E 'BookmarkBegin|BookmarkTitle|BookmarkLevel|BookmarkPageNumber')
+
+    FROM_PAGE=1
+    while IFS= read -r line; do
+        case $line in
+        BookmarkBegin)
+            # Skip if no previous bookmark to process or not at the specified level
+            [ -z "$BM_PAGE" ] && continue
+            [ "$BM_LEVEL" -gt "$BKL" ] && continue
+
+            # Process the previous bookmark range
+            _ingest_pages "$FROM_PAGE" "$BM_PAGE" "$BM_TITLE"
+            FROM_PAGE=$BM_PAGE
+            ;;
+        BookmarkTitle:*)
+            BM_TITLE="${line#BookmarkTitle: }" ;;
+        BookmarkLevel:*)
+            BM_LEVEL="${line#BookmarkLevel: }" ;;
+        BookmarkPageNumber:*)
+            BM_PAGE="${line#BookmarkPageNumber: }" ;;
+        *)
+            echo "ERROR: Unexpected bookmark line: $line"
+            exit 1
+        esac
+
+    done <<<"$BOOKMARKS"
+
+    if [[ -z "$BM_LEVEL" || -z "$BM_PAGE" || -z "$BM_TITLE" ]]; then
+        echo "ERROR: No bookmark information found"
+        exit 1
+    fi
+
+    # Ingest the final range
+    _ingest_pages "$FROM_PAGE" "end" "$BM_TITLE"
+}
+
+_ingest_pages() {
+    local FROM=$1
+    local TO=$2
+    local TITLE=$3
+
+    # excerpt data
+    EXC_DATA=$(pdftk "$PDF" cat "$FROM-$TO" output - | base64)
+    if [[ $? -ne 0 ]]; then
+        echo "Failed to extract PDF ($PDF_NAME) excerpt ($FROM_PAGE-$TO_PAGE)"
+        exit 1
+    fi
+
+    # Filter and format bookmarks
+    EXC_BOOKMARKS=$(awk -v from="$FROM" -v to="$TO" '
+    BEGIN {
+        in_range = 0;
+        titles = "[";
+    }
+    /BookmarkTitle/ {
+        title = substr($0, index($0, $2));
+    }
+    /BookmarkPageNumber/ {
+        page = $2;
+        if (page >= from && page <= to) {
+            if (in_range) {
+                titles = titles ", ";
+            }
+            titles = titles "\"" title "\"";
+            in_range = 1;
+        }
+    }
+    END {
+        titles = titles "]";
+        print titles;
+    }' <<<"$BOOKMARKS")
+
+    echo " - PDF: $PDF_NAME - From page: $FROM - To page: $TO - Size: $(wc -c <<<"$EXC_DATA")"
+
+    # Finally send the doc to ES
+     curl -sK "$CONFIG" -X POST "$ES/$IDX/_doc?pipeline=$ESPL_NAME" -d@- <<_EOM_ | jq
+{
+    "_data": "$EXC_DATA",
+    "_from": "$FROM",
+    "_to": "$TO",
+    "_title": "$TITLE",
+    "_bookmarks": $EXC_BOOKMARKS,
+    "document": {
+        "type": "PDF",
+        "filename": "$PDF_NAME",
+        "excerpt_strategy": "$STRATEGY"
+    }
+}
+_EOM_
+
+}
+
+
 ########### Utilities ##############
 
-get_es_url() {
+get_conf() {
     if [ ! -f "$CONFIG" ]; then
         echo "Error: Configuration file '$CONFIG' not found. Please generate it first using the 'config' command." >&2
         return 1
     fi
+    local ITEM=${1? config item required}
 
 #     sed -Ene 's/#(es_)?url // p' < $CONFIG | tr -d '"'
 # /\ Mine  vs. \/ GenAI
-    grep -E '^#es_url' "$CONFIG" | cut -d'"' -f2
+    grep -E "^#$ITEM" "$CONFIG" | cut -d'"' -f2
 }
 
 confirm_remove() {

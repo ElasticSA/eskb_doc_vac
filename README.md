@@ -6,7 +6,8 @@ in the Elastic Stack. Currently supported input files:
 
  - PDF
 
-The example used throughout this document will be the "IT-Grundschutz-Kompendium – Werkzeug für Informationssicherheit" from the German BSI. An 800+ page PDF of IT guidelines.
+The example used throughout this document will be the "IT-Grundschutz-Kompendium – Werkzeug für Informationssicherheit" from the German BSI. An 800+ page PDF of IT guidelines; or the multi-file
+zip download
 
 Prerequisits
 ============
@@ -48,7 +49,7 @@ e.g.
 ```
 
 The three argument are optional, but if omitted you will need to edit the resulting file
-manually to set the URL, Username and Password.
+manually to set the URL, Username and Password. Other advanced settings can also be edited in the config file.
 
 ping
 ----
@@ -78,7 +79,7 @@ This will create the inference instance, possibly triggering a model download if
 setup_ingest
 ------------
 
-This will create the ingest pipeline used to process all incoming page documents.
+This will create the ingest pipeline used to process all incoming excerpt documents.
 
 setup_index
 -----------
@@ -88,8 +89,18 @@ This will create an index to use as a knowledgebase, with all the required setti
 read_pdf
 --------
 
-Read a PDF file (name give in second argument) into the knowledgebase index
-(name given in first argument). The file will be read in one page at a time, each page becoming its own Elasticsearch document.
+Read a PDF file (name give in second argument) into the knowledgebase index (name given in first argument).
+
+The file will be read in one excerpt at a time, each excerpt becoming its own Elasticsearch document.
+There are three excerpt strategies:
+
+ - whole - Excerpt is the whole document
+ - page - Excerpts are each page in tern
+ - bookmark1 - Excerpt are all pages between Level 1 Bookmarks (default)
+
+ The bookmark1 strategy follows a document structure splitting approach that would give best results if
+ documents are too big to ingest whole. Whole documents would give best results if they are small enough.
+ (edit the config file to change the strategy)
 
 e.g.
 ```
@@ -108,14 +119,16 @@ Under the hood
 ES document schema
 ------------------
 
- - page:
-   - number
+ - excerpt:
    - content - The actual page text
-   - bookmarks - A list of bookmarks pointing to this page
+   - title - The title for excerpt
+   - bookmarks - A list of bookmarks contained within the excerpt
+   - start_page - The document page where this excerpt starts
+   - end_page - The document page where this excerpt ends
  - document:
    - format - Currently just PDF
    - filename - Base filename
-   - pages - Total number of pages
+   - strategy - Excerpt strategy (whole, page, or bookmark1)
  - content - Semantic text search field
 
 The index schema is created in do_setup_index() of the script
@@ -125,11 +138,13 @@ ES ingest pipeline
 
 Expects the following original doc input fields:
  - _data - Base64 encoded pdf page (binary) content, from which text will be extracted
- - _number - Page number
- - _bookmarks - Page bookmark list
+ - _from - Start page number
+ - _to - End page page number
+ - _title - Excerpt title
+ - _bookmarks - Excerpt bookmark list
  - document.*
 
-The pipeline will take _data, _number, & _bookmarks and create the page.* object.
+The pipeline will take _fields and create the excerpt.* object.
 It will then populate the 'content' semantic search field.
 
 This pipeline is created in do_setup_ingest() of the script
