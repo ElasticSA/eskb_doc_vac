@@ -65,6 +65,7 @@ do_ping() {
 ## Setup the ML inferencing model for data ingest
 ## This will:
 ##  - Detect the cluster system architecture and select the model accordingly
+##  - Detect ML node virtual processors and set threads to half that
 ##  - Use adaptive allocation, normally set to min. 1 and max of 2 (override with envvar: ESKB_ML_MAX_ALLOC)
 do_setup_inference() {
     ES=$(get_es_url)
@@ -75,18 +76,37 @@ do_setup_inference() {
 
     if [ "$?" = "0" ]; then
         echo "WARN: Inference '$ESINF_NAME' already exists - doing nothing"
+        return
+    fi
+
+    # Get information about the cluster ML nodes
+    NODE_INFO=$(curl -sK "$CONFIG" "$ES/_nodes/ml:true/os")
+
+    if [ "$(jq '.nodes | length' <<<"$NODE_INFO")" -lt 1 ]; then
+        echo "No ML nodes found in cluster, please add some ML nodes first"
+        exit 1
+    fi
+
+    # Detect the system architecture, and select model accordingly
+    ES_ARCH=$(jq -r '.nodes | to_entries[0].value.os.arch' <<<"$NODE_INFO")
+    if grep -qiE '^(amd64|x86[-_]64)$' <<<"$ES_ARCH"; then
+        ML_MODEL=".multilingual-e5-small_linux-x86_64"
     else
+        ML_MODEL=".multilingual-e5-small"
+    fi
 
-        # Detect the system architecture, and select model accordingly
-        ES_ARCH=$(curl -sK "$CONFIG" -X GET "$ES/_nodes/_all" | jq -r '.nodes | to_entries[0].value.os.arch')
-        if grep -qiE '^(amd64|x86[-_]64)$' <<<"$ES_ARCH"; then
-            ML_MODEL=".multilingual-e5-small_linux-x86_64"
-        else
-            ML_MODEL=".multilingual-e5-small"
-        fi
+    # Detect the number of virtual processors and set NUM_THREADS to half
+    ES_VPROC=$(jq '[.nodes[] | .os.allocated_processors // .os.available_processors] | .[0]' <<<"$NODE_INFO")
+    if [ -z "$ES_VPROC" -o "$ES_VPROC" = "null" -o "$ES_VPROC" -lt 1 ]; then
+        echo "Could not get ML node virtual processors count, please add some ML nodes"
+        exit 1
+    fi
+    NUM_THREADS=$(( (ES_VPROC + 1) / 2 ))
+    [ "$NUM_THREADS" -lt 1 ] && NUM_THREADS=1
 
-        # This will trigger an attempt to fetch the model, if not already installed
-         curl -sK "$CONFIG" -X PUT "$ES/_inference/text_embedding/$ESINF_NAME" -d@- <<_EOM_ | jq
+
+    # This will trigger an attempt to fetch the model, if not already installed
+    curl -sK "$CONFIG" -X PUT "$ES/_inference/text_embedding/$ESINF_NAME" -d@- <<_EOM_ | jq
 {
     "service": "elasticsearch",
     "service_settings": {
@@ -95,13 +115,12 @@ do_setup_inference() {
             "min_number_of_allocations": 1,
             "max_number_of_allocations": $ML_MAX_ALLOC
         },
-        "num_threads": 2,
+        "num_threads": $NUM_THREADS,
         "model_id": "$ML_MODEL"
     }
 }
 _EOM_
 
-    fi
 }
 
 #############################################################################
@@ -159,9 +178,10 @@ do_setup_index() {
 
     if [ "$?" = "0" ]; then
         echo "WARN: Index '$IDX' already exists - doing nothing"
-    else
+        return
+    fi
 
-        curl -sK "$CONFIG" -X PUT "$ES/$IDX" -d@- <<_EOM_ | jq
+    curl -sK "$CONFIG" -X PUT "$ES/$IDX" -d@- <<_EOM_ | jq
 {
   "settings": {
     "index": {
@@ -217,7 +237,6 @@ do_setup_index() {
 }
 _EOM_
 
-    fi
 }
 
 #############################################################################
