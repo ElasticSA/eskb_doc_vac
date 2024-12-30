@@ -6,8 +6,13 @@ in the Elastic Stack. Currently supported input files:
 
  - PDF
 
-The example used throughout this document will be the "IT-Grundschutz-Kompendium – Werkzeug für Informationssicherheit" from the German BSI. An 800+ page PDF of IT guidelines; or the multi-file
-zip download
+The two example used throughout this document will be:
+
+ **(A)** The "IT-Grundschutz-Kompendium – Werkzeug für Informationssicherheit" from the German BSI.
+ An 800+ page PDF of IT guidelines; [https://www.bsi.bund.de/DE/Themen/Unternehmen-und-Organisationen/Standards-und-Zertifizierung/IT-Grundschutz/IT-Grundschutz-Kompendium/it-grundschutz-kompendium_node.html]
+
+ **(B)** The "T-Grundschutz-Bausteine" - Broken down to multiple PDFs files in one zip download
+ [https://www.bsi.bund.de/SharedDocs/Downloads/DE/BSI/Grundschutz/IT-GS-Kompendium_Einzel_PDFs_2023/Zip_Datei_Edition_2023.html]
 
 Prerequisits
 ============
@@ -31,7 +36,7 @@ help
 
 Lists all available commands and if a command-name is additionally given it will show more infomation on that command
 
-e.g.
+e.g. (A) & (B)
 
 ```
 ./eskb_doc_vac help
@@ -43,7 +48,7 @@ config
 
 Configure your connection to Elasticsearch. This will generate a config file in the current directory, to be used by all other commands.
 
-e.g.
+e.g. (A) & (B)
 ```
 ./eskb_doc_vac config https://es-url.example.com some_username some_password
 ```
@@ -51,12 +56,23 @@ e.g.
 The three argument are optional, but if omitted you will need to edit the resulting file
 manually to set the URL, Username and Password. Other advanced settings can also be edited in the config file.
 
+Regarding examples (A) and (B), the strategy default `bookmark1` suits (A), however for (B):
+You will need to edit the config file and change the strategy to `whole`:
+```
+...
+#strategy "whole"
+...
+```
+
+See read_pdf below for more infomation on this
+
+
 ping
 ----
 
 Check that your Elasticsearch configuration is correct, and that you can access the instance.
 
-e.g.
+e.g. (A) & (B)
 ```
 ./eskb_doc_vac ping
 ```
@@ -66,12 +82,12 @@ setup_all
 
 Performs all the follwing setup steps in one go.
 
-e.g. - For one big file
+e.g. (A) - For one big file
 ```
 ./eskb_doc_vac setup_all kb_bsi_compendium
 ```
 
-or e.g. - For many small files
+e.g. (B) - For many small files
 ```
 ./eskb_doc_vac setup_all kb_bsi_collection
 ```
@@ -107,12 +123,12 @@ There are three excerpt strategies:
  documents are too big to ingest whole. Whole documents would give best results if they are small enough.
  (edit the config file to change the strategy)
 
-e.g. - Strategy configured to `bookmark1`
+e.g. (A) - Strategy configured to `bookmark1`
 ```
 ./eskb_doc_vac read_pdf kb_bsi_compendium ~/Downloads/IT_Grundschutz_Kompendium_Edition2023.pdf
 ```
 
-or e.g. - Strategy configured to `whole`
+e.g. (B) - Strategy configured to `whole`
 ```
 unzip ~/Downloads/Zip_Datei_Edition_2023.zip
 ./eskb_doc_vac read_pdf kb_bsi_collection ./Einzeln_PDF/*.pdf

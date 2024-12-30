@@ -9,11 +9,6 @@ SHNAME=$(basename "$0")
 
 CONFIG=${ESKB_CONFIG:-_$SHNAME.config}
 
-# ESPL_NAME="$SHNAME-pipeline"
-# ESINF_NAME="$SHNAME-e5-model"
-
-ML_MAX_ALLOC=${ESKB_ML_MAX_ALLOC:-2}
-
 REQUIRED_TOOLS="curl pdftk jq sed awk cut grep"
 
 #############################################################################
@@ -81,6 +76,7 @@ do_ping() {
 ##  - Use adaptive allocation, normally set to min. 1 and max of 2 (override with envvar: ESKB_ML_MAX_ALLOC)
 do_setup_inference() {
     ES=$(get_conf es_url)
+    ML_MAX_ALLOC=$(get_conf es_ml_max_alloc)
 
     ESINF_NAME=$(get_conf es_inference_name)
     echo "Setup inference model '$ESINF_NAME' on: $ES"
