@@ -66,9 +66,14 @@ setup_all
 
 Performs all the follwing setup steps in one go.
 
-e.g.
+e.g. - For one big file
 ```
-./eskb_doc_vac setup_all kb_bsi
+./eskb_doc_vac setup_all kb_bsi_compendium
+```
+
+or e.g. - For many small files
+```
+./eskb_doc_vac setup_all kb_bsi_collection
 ```
 
 setup_inference
@@ -102,9 +107,15 @@ There are three excerpt strategies:
  documents are too big to ingest whole. Whole documents would give best results if they are small enough.
  (edit the config file to change the strategy)
 
-e.g.
+e.g. - Strategy configured to `bookmark1`
 ```
-./eskb_doc_vac read_pdf kb_bsi ~/Downloads/IT_Grundschutz_Kompendium_Edition2023.pdf
+./eskb_doc_vac read_pdf kb_bsi_compendium ~/Downloads/IT_Grundschutz_Kompendium_Edition2023.pdf
+```
+
+or e.g. - Strategy configured to `whole`
+```
+unzip ~/Downloads/Zip_Datei_Edition_2023.zip
+./eskb_doc_vac read_pdf kb_bsi_collection ./Einzeln_PDF/*.pdf
 ```
 
 That's it! Once read in you can add the index as a knowledgebase to either assistant (Obervability or Security), alternatively you can play with it in the playground.
@@ -129,7 +140,7 @@ ES document schema
    - format - Currently just PDF
    - filename - Base filename
    - strategy - Excerpt strategy (whole, page, or bookmark1)
- - content - Semantic text search field
+ - semantic_content - Semantic text search field
 
 The index schema is created in do_setup_index() of the script
 

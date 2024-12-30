@@ -179,12 +179,6 @@ do_setup_ingest() {
                 "field": "_bookmarks",
                 "target_field": "excerpt.bookmarks"
             }
-        },
-        {
-            "set": {
-                "field": "content",
-                "copy_from": "excerpt.content"
-            }
         }
     ]
 }
@@ -232,7 +226,8 @@ do_setup_index() {
       "excerpt": {
         "properties": {
           "content": {
-            "type": "text"
+            "type": "text",
+            "copy_to": "semantic_content"
           },
           "start_page": {
             "type": "long"
@@ -266,7 +261,7 @@ do_setup_index() {
           }
         }
       },
-      "content": {
+      "semantic_content": {
         "type": "semantic_text",
         "inference_id": "$ESINF_NAME"
       }
