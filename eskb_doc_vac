@@ -28,13 +28,13 @@ REQUIRED_TOOLS="curl pdftk jq sed awk cut grep"
 ##  user - curl User:PW config option
 ##  header - headers curl should send, please leave untouched
 do_config() {
-    if [ $# -lt 4 ]; then
-        echo "Generating configuration in '$CONFIG' - with given parameters"
-        ESURL=${1:-ES_URL_UNSET}
-        ESUN=${2:-USERNAME_UNSET}
-        ESPW=${3:-PASSWORD_UNSET}
 
-        cat >"$CONFIG" <<_EOM_
+    echo "Generating configuration in '$CONFIG' - with given parameters"
+    ESURL=${1:-ES_URL_UNSET}
+    ESUN=${2:-USERNAME_UNSET}
+    ESPW=${3:-PASSWORD_UNSET}
+
+    cat >"$CONFIG" <<_EOM_
 #es_url "$ESURL"
 #strategy "auto"
 #es_inference_name "$SHNAME-e5-model"
@@ -46,15 +46,6 @@ header "Content-Type: application/json"
 _EOM_
 
     echo "Configuration generated in '$CONFIG'."
-
-    else
-        echo "Usage: $0 config [es_url] [username] [password]"
-        echo "  - es_url: URL of the Elasticsearch instance"
-        echo "  - username: Username for authentication"
-        echo "  - password: Password for authentication"
-        echo
-        echo "Current config file location: $CONFIG"
-    fi
 }
 
 #############################################################################
@@ -382,7 +373,7 @@ do_read_pdf() {
 ########### PDF read strategies ###########
 
 # Please note: Breaking the PDF in a sensible way proved to be more complicated than first thought.
-# As such this section of the script gets a little more complicated than i wanted
+# As such this section of the script gets a little more complicated than I wanted
 # Basically _read_pdf_by_* determine a FROM-TO page range for each excerpt
 # Then _ingest_pages is called to extract those pages and add the excerpt as an ES doc
 # We also use some awk-foo to work out all the bookmarks within that range
@@ -449,17 +440,28 @@ _read_pdf_by_bookmark() {
     PAGE_COUNT=$(pdftk "$PDF" dump_data | grep NumberOfPages | cut -d' ' -f2 )
     BOOKMARKS=$(pdftk "$PDF" dump_data_utf8 | grep -E 'BookmarkBegin|BookmarkTitle|BookmarkLevel|BookmarkPageNumber')
 
+    if [[ -z "$BOOKMARKS" ]]; then
+        echo "ERROR: No bookmarks found in the PDF."
+        exit 1
+    fi
+
     FROM_PAGE=1
+    LAST_TITLE="[Document Prologue]"
+    BOOKMARK_MATCHED=0
     while IFS= read -r line; do
         case $line in
         BookmarkBegin)
-            # Skip if no previous bookmark to process or not at the specified level
+            # Skip if no previous bookmark to process
             [ -z "$BM_PAGE" ] && continue
+            # Skip if not at the specified level
             [ "$BM_LEVEL" -gt "$BKL" ] && continue
 
             # Process the previous bookmark range
-            _ingest_pages "$FROM_PAGE" "$BM_PAGE" "$BM_TITLE"
+            _ingest_pages "$FROM_PAGE" "$BM_PAGE" "$LAST_TITLE"
+
             FROM_PAGE=$BM_PAGE
+            LAST_TITLE=$BM_TITLE
+            BOOKMARK_MATCHED=1
             ;;
         BookmarkTitle:*)
             BM_TITLE="${line#BookmarkTitle: }" ;;
@@ -474,13 +476,17 @@ _read_pdf_by_bookmark() {
 
     done <<<"$BOOKMARKS"
 
-    if [[ -z "$BM_LEVEL" || -z "$BM_PAGE" || -z "$BM_TITLE" ]]; then
-        echo "ERROR: No bookmark information found"
+    if [[ -z "$BM_LEVEL" || -z "$BM_PAGE" || -z "$BM_TITLE" || "$BOOKMARK_MATCHED" == 0 ]]; then
+        echo "ERROR: No (matching) bookmark information found"
         exit 1
     fi
 
     # Ingest the final range
-    _ingest_pages "$FROM_PAGE" "$PAGE_COUNT" "$BM_TITLE"
+    if [ "$BM_LEVEL" -gt "$BKL" ]; then
+        _ingest_pages "$FROM_PAGE" "$PAGE_COUNT" "$LAST_TITLE"
+    else
+        _ingest_pages "$BM_PAGE" "$PAGE_COUNT" "$BM_TITLE"
+    fi
 }
 
 _ingest_pages() {
@@ -545,7 +551,7 @@ _EOM_
 get_conf() {
     if [ ! -f "$CONFIG" ]; then
         echo "Error: Configuration file '$CONFIG' not found. Please generate it first using the 'config' command." >&2
-        return 1
+        exit 1
     fi
     local ITEM=${1? config item required}
 

@@ -190,7 +190,7 @@ ES ingest pipeline
 ------------------
 
 Expects the following original doc input fields:
- - _data - Base64 encoded pdf page (binary) content, from which text will be extracted
+ - _data - Base64 encoded pdf excerpt (binary) content, from which text will be extracted
  - _from - Start page number
  - _to - End page page number
  - _title - Excerpt title
@@ -198,7 +198,6 @@ Expects the following original doc input fields:
  - document.*
 
 The pipeline will take _fields and create the excerpt.* object.
-It will then populate the 'content' semantic search field.
 
 This pipeline is created in do_setup_ingest() of the script
 
