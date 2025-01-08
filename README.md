@@ -35,7 +35,7 @@ It is assumed Linux users know how to install such common shell packages.
 
 I like to use Nix as a package manager [https://nixos.org/download/]. Therefore I can for example do `nix-env -i pdftk` to add pdftk to my user's shell environment.
 
-Many other MocOS users like to use Brew [https://brew.sh/]
+Many other MacOS users like to use Brew [https://brew.sh/]
 
 ### Windows
 

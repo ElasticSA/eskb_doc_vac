@@ -67,7 +67,7 @@ do_ping() {
 ## This will:
 ##  - Detect the cluster system architecture and select the model accordingly
 ##  - Detect ML node virtual processors and set threads to half that
-##  - Use adaptive allocation, normally set to min. 1 and max of 2 (override with envvar: ESKB_ML_MAX_ALLOC)
+##  - Use adaptive allocation, normally set to min. 1 and max of 2 (override within config file)
 do_setup_inference() {
     ES=$(get_conf es_url)
     ML_MAX_ALLOC=$(get_conf es_ml_max_alloc)
