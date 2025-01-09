@@ -15,8 +15,16 @@ AUTO_THRESHOLD=500000
 REQUIRED_TOOLS="curl pdftk jq sed awk cut grep"
 
 # Need to ensure awk/sed handle UTF8, by having a UTF-8 locale set
-# This list all locales enabled, and filter for English UTF-8 (e.g. en_GB.UTF-8 or en_US.UTF-8) and picks the first
-export LC_ALL=$(locale -a | grep '^en.*UTF-8$' | head -n1)
+if [[ ! "$LC_ALL" =~ UTF-8$ ]]; then
+
+    # This list all locales enabled, and filter for English UTF-8 (e.g. en_GB.UTF-8 or en_US.UTF-8) and picks the first
+    export LC_ALL=$(locale -a | grep '^en.*UTF-8$' | head -n1)
+
+    if [[ -z "$LC_ALL" ]]; then
+        echo "Error: No English UTF-8 locale found on the system."
+        exit 1
+    fi
+fi
 
 #############################################################################
 ## Generate a configuration to connect to Elasticsearch in the current directory
