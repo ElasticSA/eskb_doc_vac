@@ -332,12 +332,19 @@ do_remove_all() {
 ## Reads PDF file (File_Name) and adds each excerpt as its own doc to the index (Index_Name)
 ## Usage: ... read1_pdf <Index_Name> <File_Name>
 do_read1_pdf() {
-    # Due to 'auto' strategy, we need to reset this every iteration
-    STRATEGY=$(get_conf strategy)
+    ES="${ES:=$(get_conf es_url)}"
 
     ESPL_NAME="${ESPL_NAME:=$(get_conf es_pipeline_name)}"
     IDX=${1?Target index required. See $0 help read1_pdf}
+
     PDF=${2?PDF file required. See $0 help read1_pdf}
+    PDF_NAME=$(basename "$PDF")
+
+    BOOKMARKS=$(pdftk "$PDF" dump_data_utf8 | grep -E 'BookmarkBegin|BookmarkTitle|BookmarkLevel|BookmarkPageNumber')
+    PAGE_COUNT=$(pdftk "$PDF" dump_data | grep NumberOfPages | cut -d' ' -f2 )
+
+    # Due to 'auto' strategy, we need to reset this every iteration
+    STRATEGY=$(get_conf strategy)
 
     # Validate strategy
     case "$STRATEGY" in
@@ -398,25 +405,13 @@ _read_pdf_by_auto() {
 }
 
 _read_pdf_by_whole() {
-    ES="${ES:=$(get_conf es_url)}"
-
-    PDF_NAME=$(basename "$PDF")
     echo "Read file '$PDF_NAME' into '$IDX' as a whole document on: $ES"
-
-    BOOKMARKS=$(pdftk "$PDF" dump_data_utf8 | grep -E 'BookmarkBegin|BookmarkTitle|BookmarkLevel|BookmarkPageNumber')
-    PAGE_COUNT=$(pdftk "$PDF" dump_data | grep NumberOfPages | cut -d' ' -f2 )
 
     _ingest_pages 1 "$PAGE_COUNT" "Whole entire document"
 }
 
 _read_pdf_by_page() {
-    ES="${ES:=$(get_conf es_url)}"
-
-    PDF_NAME=$(basename "$PDF")
     echo "Read file '$PDF_NAME' into '$IDX' using per page, on: $ES"
-
-    BOOKMARKS=$(pdftk "$PDF" dump_data_utf8 | grep -E 'BookmarkBegin|BookmarkTitle|BookmarkLevel|BookmarkPageNumber')
-    PAGE_COUNT=$(pdftk "$PDF" dump_data | grep NumberOfPages | cut -d' ' -f2 )
 
     for PAGE in $(seq 1 "$PAGE_COUNT"); do
         _ingest_pages $PAGE $PAGE "Page $PAGE of $PAGE_COUNT"
@@ -431,23 +426,20 @@ _read_pdf_by_page() {
 # BookmarkBegin
 # ...
 _read_pdf_by_bookmark() {
-    ES="${ES:=$(get_conf es_url)}"
     BKL=${STRATEGY#bookmark}
-
-    PDF_NAME=$(basename "$PDF")
     echo "Read file '$PDF_NAME' into '$IDX' using Bookmark $BKL on: $ES"
-
-    PAGE_COUNT=$(pdftk "$PDF" dump_data | grep NumberOfPages | cut -d' ' -f2 )
-    BOOKMARKS=$(pdftk "$PDF" dump_data_utf8 | grep -E 'BookmarkBegin|BookmarkTitle|BookmarkLevel|BookmarkPageNumber')
 
     if [[ -z "$BOOKMARKS" ]]; then
         echo "ERROR: No bookmarks found in the PDF."
         exit 1
     fi
 
-    FROM_PAGE=1
-    LAST_TITLE="[Document Prologue]"
-    BOOKMARK_MATCHED=0
+    local FROM_PAGE=1
+    local LAST_TITLE="[Document Prologue]"
+    local BOOKMARK_MATCHED=0
+    local BM_TITLE=
+    local BM_LEVEL=
+    local BM_PAGE=
     while IFS= read -r line; do
         case $line in
         BookmarkBegin)
@@ -492,7 +484,8 @@ _read_pdf_by_bookmark() {
 _ingest_pages() {
     local FROM=$1
     local TO=$2
-    local TITLE=$3
+    local TITLE=$(sed 's/[^[:print:]]//g' <<<$3)
+
 
     # excerpt data
     EXC_DATA=$(pdftk "$PDF" cat "$FROM-$TO" output - | base64)
@@ -506,6 +499,10 @@ _ingest_pages() {
     BEGIN {
         in_range = 0;
         titles = "[";
+    }
+    {
+        # Remove control characters, keep only printable ones
+        gsub(/[^[:print:]]/, "", $0);
     }
     /BookmarkTitle/ {
         title = substr($0, index($0, $2));
@@ -625,10 +622,10 @@ do_help() {
 # Main script
 
 for cmd in $REQUIRED_TOOLS; do
-  if ! command -v "$cmd" &>/dev/null; then
-    echo "Needed tool '$cmd' not found, please install it."
-    exit 1
-  fi
+    if ! command -v "$cmd" &>/dev/null; then
+        echo "Needed tool '$cmd' not found, please install it."
+        exit 1
+    fi
 done
 
 if [ $# -eq 0 ]; then
