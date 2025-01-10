@@ -211,6 +211,19 @@ curl commands, you can read the script and follow along. Each command is a funct
 
 ----
 
+Changes / Updates
+=================
+
+The original script was built around the new Elastic e5 multilingual model. However its dense_vectors*
+are not currently supported by the Elastic Security AI Assistant (my main interest).
+So this script has been changed to use "ELSER" (English trained model), which gives sparse_vectors*.
+
+It was still able to converse with me regarding the German language BSI docs used in the examples here.
+
+The original e5 script can be found in ./file_vac/ and/or you can change the EMBEDDING_MODE var in the new script.
+
+(*) The meaning of sparse vs. dense vectors is not important here, just that they are not the same thing.
+
 Acknowledgements
 ================
 

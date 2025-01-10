@@ -12,6 +12,14 @@ CONFIG=${ESKB_CONFIG:-_$SHNAME.config}
 # Size in bytes for 'auto' strategy to switch from 'whole' to 'bookmark1'
 AUTO_THRESHOLD=500000
 
+# What sort of embedding are we doing?
+# ELSER English & sparse (As of 8.16 Sec. AI Assitant requires sparse!)
+# E5 multilingual & dense
+EMBEDDING_MODE=elser
+
+# Not currently testing this path
+# EMBEDDING_MODE=e5
+
 REQUIRED_TOOLS="curl pdftk jq sed awk cut grep"
 
 # Need to ensure awk/sed handle UTF8, by having a UTF-8 locale set
@@ -49,7 +57,7 @@ do_config() {
     cat >"$CONFIG" <<_EOM_
 #es_url "$ESURL"
 #strategy "auto"
-#es_inference_name "$SHNAME-e5-model"
+#es_inference_name "$SHNAME-$EMBEDDING_MODE-model"
 #es_pipeline_name "$SHNAME-pipeline"
 #es_ml_max_alloc "2"
 user "$ESUN:$ESPW"
@@ -82,13 +90,13 @@ do_ping() {
 ##  - Use adaptive allocation, normally set to min. 1 and max of 2 (override within config file)
 do_setup_inference() {
     ES=$(get_conf es_url)
-    ML_MAX_ALLOC=$(get_conf es_ml_max_alloc)
+    local ML_MAX_ALLOC=$(get_conf es_ml_max_alloc)
 
     ESINF_NAME=$(get_conf es_inference_name)
     echo "Setup inference model '$ESINF_NAME' on: $ES"
 
     # Test if inference already exists
-    curl -sK "$CONFIG" --fail-with-body "$ES/_inference/text_embedding/$ESINF_NAME" >/dev/null
+    curl -sK "$CONFIG" --fail-with-body "$ES/_inference/$ESINF_NAME" >/dev/null
 
     if [ "$?" = "0" ]; then
         echo "WARN: Inference '$ESINF_NAME' already exists - doing nothing"
@@ -103,16 +111,33 @@ do_setup_inference() {
         exit 1
     fi
 
-    # Detect the system architecture, and select model accordingly
-    ES_ARCH=$(jq -r '.nodes | to_entries[0].value.os.arch' <<<"$NODE_INFO")
+    # What sort of embedding are we doing?
+    # ELSER English & sparse (As of 8.16 Sec. AI Assitant requires sparse!)
+    # E5 multilingual & dense
+    local ML_MODEL=
+    local TASK_TYPE=
+    case "$EMBEDDING_MODE" in
+        "elser")
+            TASK_TYPE=sparse_embedding
+            ML_MODEL=.elser_model_2
+        ;;
+        "e5")
+            TASK_TYPE=text_embedding
+            ML_MODEL=.multilingual-e5-small
+        ;;
+        *)
+            echo "ERROR Invalid ML vector type: $ML_VECTOR_TYPE"; exit 1;
+    esac
+
+    # Detect the system architecture, and switch model accordingly
+    local ES_ARCH=$(jq -r '.nodes | to_entries[0].value.os.arch' <<<"$NODE_INFO")
     if grep -qiE '^(amd64|x86[-_]64)$' <<<"$ES_ARCH"; then
-        ML_MODEL=".multilingual-e5-small_linux-x86_64"
-    else
-        ML_MODEL=".multilingual-e5-small"
+        ML_MODEL="${ML_MODEL}_linux-x86_64"
     fi
 
     # Detect the number of virtual processors and set NUM_THREADS to half
-    ES_VPROC=$(jq '[.nodes[] | .os.allocated_processors // .os.available_processors] | .[0]' <<<"$NODE_INFO")
+    local NUM_THREADS=
+    local ES_VPROC=$(jq '[.nodes[] | .os.allocated_processors // .os.available_processors] | .[0]' <<<"$NODE_INFO")
     if [ -z "$ES_VPROC" -o "$ES_VPROC" = "null" -o "$ES_VPROC" -lt 1 ]; then
         echo "Could not get ML node virtual processors count, please add some ML nodes"
         exit 1
@@ -121,9 +146,11 @@ do_setup_inference() {
     [ "$NUM_THREADS" -lt 1 ] && NUM_THREADS=1
 
 
+
     # This will trigger an attempt to fetch the model, if not already installed
-    curl -sK "$CONFIG" -X PUT "$ES/_inference/text_embedding/$ESINF_NAME" -d@- <<_EOM_ | jq
+    curl -sK "$CONFIG" -X PUT "$ES/_inference/$ESINF_NAME" -d@- <<_EOM_ | jq
 {
+    "task_type": "$TASK_TYPE",
     "service": "elasticsearch",
     "service_settings": {
         "adaptive_allocations": {
@@ -144,6 +171,7 @@ _EOM_
 do_setup_ingest() {
     ES=$(get_conf es_url)
     ESPL_NAME=$(get_conf es_pipeline_name)
+    ESINF_NAME=$(get_conf es_inference_name)
     echo "Setup ingest pipeline '$ESPL_NAME' on: $ES"
 
     curl -sK "$CONFIG" -X PUT "$ES/_ingest/pipeline/$ESPL_NAME" -d@- <<_EOM_ | jq
@@ -323,7 +351,7 @@ do_remove_inference() {
 
     confirm_remove inference
 
-    curl -sK "$CONFIG" -X DELETE "$ES/_inference/text_embedding/$ESINF_NAME" | jq
+    curl -sK "$CONFIG" -X DELETE "$ES/_inference/$ESINF_NAME" | jq
 }
 
 #############################################################################
@@ -384,6 +412,12 @@ do_read_pdf() {
 
     local IDX=${1?Index name required. See: $0 help read_pdf}
     shift
+
+    if [[ -f $IDX ]]; then
+        echo "ERROR: First argument should be an index name, but appears to be a file: $IDX"
+        exit 1
+    fi
+
     for F in "$@"; do
         do_read1_pdf "$IDX" "$F"
     done
@@ -500,14 +534,14 @@ _ingest_pages() {
 
 
     # excerpt data
-    EXC_DATA=$(pdftk "$PDF" cat "$FROM-$TO" output - | base64)
+    local EXC_DATA=$(pdftk "$PDF" cat "$FROM-$TO" output - | base64 )
     if [[ $? -ne 0 ]]; then
         echo "Failed to extract PDF ($PDF_NAME) excerpt ($FROM_PAGE-$TO_PAGE)"
         exit 1
     fi
 
     # Filter and format bookmarks
-    EXC_BOOKMARKS=$(awk -v from="$FROM" -v to="$TO" '
+    local EXC_BOOKMARKS=$(awk -v from="$FROM" -v to="$TO" '
     BEGIN {
         in_range = 0;
         titles = "[";
@@ -534,10 +568,14 @@ _ingest_pages() {
         print titles;
     }' <<<"$BOOKMARKS")
 
-    echo " - PDF: $PDF_NAME - From page: $FROM - To page: $TO - Size: $(wc -c <<<"$EXC_DATA")"
+    # If you ingest the same excerpt twice, it should update the existing instead of creating a new one
+    # Due to matching doc _id, by using a hash
+    local DOCID=$(url_safe_hash <<<"$PDF_NAME|$PAGE_COUNT|$STRATEGY|$FROM|$TO|$TITLE|$BOOKMARKS" )
+
+    echo " - PDF: $PDF_NAME - From page: $FROM - To page: $TO - DocID: $DOCID - Data size: $(wc -c <<<"$EXC_DATA")"
 
     # Finally send the doc to ES
-     curl -sK "$CONFIG" -X POST "$ES/$IDX/_doc?pipeline=$ESPL_NAME" -d@- <<_EOM_ | jq
+     curl -sK "$CONFIG" -X POST "$ES/$IDX/_doc/$DOCID?pipeline=$ESPL_NAME" -d@- <<_EOM_ | jq
 {
     "_data": "$EXC_DATA",
     "_from": "$FROM",
@@ -585,6 +623,11 @@ confirm_remove() {
         exit 1
         ;;
     esac
+}
+
+url_safe_hash()
+{
+    openssl sha256 -binary | openssl base64 | tr '+/' '-_' | tr -d '='
 }
 
 ########### Boiler plate stuff from here down #############
