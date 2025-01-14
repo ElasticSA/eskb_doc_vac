@@ -10,15 +10,15 @@ SHNAME=$(basename "$0")
 CONFIG=${ESKB_CONFIG:-_$SHNAME.config}
 
 # Size in bytes for 'auto' strategy to switch from 'whole' to 'bookmark1'
-AUTO_THRESHOLD=500000
+AUTO_THRESHOLD=${ESKB_AUTO_THRESHOLD:-500000}
 
 # What sort of embedding are we doing?
 # ELSER English & sparse (As of 8.16 Sec. AI Assitant requires sparse!)
 # E5 multilingual & dense
-EMBEDDING_MODE=elser
+EMBEDDING_MODE=${ESKB_EMBEDDING_MODE:-elser}
 
 # Not currently testing this path
-# EMBEDDING_MODE=e5
+# EMBEDDING_MODE=${ESKB_EMBEDDING_MODE:-e5}
 
 REQUIRED_TOOLS="curl pdftk jq sed awk cut grep"
 
