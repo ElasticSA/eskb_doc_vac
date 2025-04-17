@@ -20,7 +20,7 @@ Prerequisits
  - The Elastic Stack (In cloud or on-prem) with at least 8GB of ML node capacity available
    - This script will try to deploy elastics e5 model [https://www.elastic.co/guide/en/machine-learning/current/ml-nlp-e5.html]
  - MacOS or Linux to run the bash script with the following tools installed
-   - `curl jq pdftk sed awk grep cut`
+   - `curl jq pdftk sed awk grep cut openssl`
  - One or more PDF files you'd like to ask questions about or be used to correctly guide your analysts
 
 Installing needed shell tools

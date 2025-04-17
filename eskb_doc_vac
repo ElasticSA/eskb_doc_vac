@@ -20,7 +20,7 @@ EMBEDDING_MODE=${ESKB_EMBEDDING_MODE:-elser}
 # Not currently testing this path
 # EMBEDDING_MODE=${ESKB_EMBEDDING_MODE:-e5}
 
-REQUIRED_TOOLS="curl pdftk jq sed awk cut grep"
+REQUIRED_TOOLS="curl pdftk jq sed awk cut grep openssl"
 
 # Need to ensure awk/sed handle UTF8, by having a UTF-8 locale set
 if [[ ! "$LC_ALL" =~ UTF-8$ ]]; then
