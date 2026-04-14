@@ -1,0 +1,658 @@
+#!/bin/bash
+#
+# (C) 2024 Elasticsearch
+# Author: Thorben Jändling
+# License: LGPL 2.1 or any minor 2.x version there above
+#
+
+SHNAME=$(basename "$0")
+
+CONFIG=${ESKB_CONFIG:-_$SHNAME.config}
+
+# Size in bytes for 'auto' strategy to switch from 'whole' to 'bookmark1'
+AUTO_THRESHOLD=${ESKB_AUTO_THRESHOLD:-500000}
+
+# What sort of embedding are we doing?
+# ELSER English & sparse (As of 8.16 Sec. AI Assitant requires sparse!)
+# E5 multilingual & dense (Tested in 9.x)
+# EMBEDDING_MODE=${ESKB_EMBEDDING_MODE:-elser}
+
+EMBEDDING_MODE=${ESKB_EMBEDDING_MODE:-e5}
+
+REQUIRED_TOOLS="curl qpdf jq sed awk cut grep openssl"
+
+# Ensure UTF-8 locale
+if [[ ! "$LC_ALL" =~ UTF-8$ ]]; then
+
+    # This list all locales enabled, and filter for English UTF-8 (e.g. en_GB.UTF-8 or en_US.UTF-8) and picks the first
+    export LC_ALL=$(locale -a | grep '^en.*UTF-8$' | head -n1)
+
+    [[ -z "$LC_ALL" ]] && echo "Error: No English UTF-8 locale found." && exit 1
+fi
+
+#############################################################################
+## Generate a configuration to connect to Elasticsearch in the current directory
+## Usage: ... config [es_url] [username] [password]
+## ^ Any parameter not given will need to be set manually by editing the generated config file
+## You can override the config file location by setting ESKB_CONFIG
+##
+## The file format is a curl config file, but with custom settings prefixed with # so that curl ignores them
+##
+## Key entries:
+##  #es_url - Elasticsearch URL
+##  #strategy - Excerpt strategy: How to divide (chunk) large PDFs: auto, whole, page, bookmark1
+##  user - curl User:PW config option
+##  header - headers curl should send, please leave untouched
+do_config() {
+
+    echo "Generating configuration in '$CONFIG' - with given parameters"
+    ESURL=${1:-ES_URL_UNSET}
+    ESUN=${2:-USERNAME_UNSET}
+    ESPW=${3:-PASSWORD_UNSET}
+
+    cat >"$CONFIG" <<_EOM_
+#es_url "$ESURL"
+#strategy "auto"
+#es_inference_name "$SHNAME-$EMBEDDING_MODE-model"
+#es_pipeline_name "$SHNAME-pipeline"
+#es_ml_max_alloc "2"
+user "$ESUN:$ESPW"
+header "Accept: application/json"
+header "Content-Type: application/json"
+_EOM_
+
+    echo "Configuration generated in '$CONFIG'."
+}
+
+#############################################################################
+## Test the configuration is correct and that we can connect to Elasticsearch
+do_ping() {
+    ES=$(get_conf es_url)
+    echo "Ping/Connection test - Using config: $CONFIG"
+    echo "Trying to get cluster info from: $ES"
+
+    curl -sK "$CONFIG" --fail-with-body "$ES/" | jq || {
+        echo "Error: curl failed to connect to Elasticsearch. Check configuration: '$CONFIG'" >&2
+        return 1
+    }
+
+}
+
+#############################################################################
+## Setup the ML inferencing model for data ingest
+## This will:
+##  - Detect the cluster system architecture and select the model accordingly
+##  - Detect ML node virtual processors and set threads to half that
+##  - Use adaptive allocation, normally set to min. 1 and max of 2 (override within config file)
+do_setup_inference() {
+    ES=$(get_conf es_url)
+    local ML_MAX_ALLOC=$(get_conf es_ml_max_alloc)
+
+    ESINF_NAME=$(get_conf es_inference_name)
+    echo "Setup inference model '$ESINF_NAME' on: $ES"
+
+    # Test if inference already exists
+    curl -sK "$CONFIG" --fail-with-body "$ES/_inference/$ESINF_NAME" >/dev/null
+
+    if [ "$?" = "0" ]; then
+        echo "WARN: Inference '$ESINF_NAME' already exists - doing nothing"
+        return
+    fi
+
+    # Get information about the cluster ML nodes
+    NODE_INFO=$(curl -sK "$CONFIG" "$ES/_nodes/ml:true/os")
+
+    if [ "$(jq '.nodes | length' <<<"$NODE_INFO")" -lt 1 ]; then
+        echo "No ML nodes found in cluster, please add some ML nodes first"
+        exit 1
+    fi
+
+    # What sort of embedding are we doing?
+    # ELSER English & sparse (As of 8.16 Sec. AI Assitant requires sparse!)
+    # E5 multilingual & dense
+    local ML_MODEL=
+    local TASK_TYPE=
+    case "$EMBEDDING_MODE" in
+        "elser")
+            TASK_TYPE=sparse_embedding
+            ML_MODEL=.elser_model_2
+        ;;
+        "e5")
+            TASK_TYPE=text_embedding
+            ML_MODEL=.multilingual-e5-small
+        ;;
+        *)
+            echo "ERROR Invalid ML vector type: $ML_VECTOR_TYPE"; exit 1;
+    esac
+
+    # Detect the system architecture, and switch model accordingly
+    local ES_ARCH=$(jq -r '.nodes | to_entries[0].value.os.arch' <<<"$NODE_INFO")
+    if grep -qiE '^(amd64|x86[-_]64)$' <<<"$ES_ARCH"; then
+        ML_MODEL="${ML_MODEL}_linux-x86_64"
+    fi
+
+    # Detect the number of virtual processors and set NUM_THREADS to half
+    local NUM_THREADS=
+    local ES_VPROC=$(jq '[.nodes[] | .os.allocated_processors // .os.available_processors] | .[0]' <<<"$NODE_INFO")
+    if [ -z "$ES_VPROC" -o "$ES_VPROC" = "null" -o "$ES_VPROC" -lt 1 ]; then
+        echo "Could not get ML node virtual processors count, please add some ML nodes"
+        exit 1
+    fi
+    NUM_THREADS=$(( (ES_VPROC + 1) / 2 ))
+    [ "$NUM_THREADS" -lt 1 ] && NUM_THREADS=1
+
+
+
+    # This will trigger an attempt to fetch the model, if not already installed
+    curl -sK "$CONFIG" -X PUT "$ES/_inference/$ESINF_NAME" -d@- <<_EOM_ | jq
+{
+    "task_type": "$TASK_TYPE",
+    "service": "elasticsearch",
+    "service_settings": {
+        "adaptive_allocations": {
+            "enabled": true,
+            "min_number_of_allocations": 1,
+            "max_number_of_allocations": $ML_MAX_ALLOC
+        },
+        "num_threads": $NUM_THREADS,
+        "model_id": "$ML_MODEL"
+    }
+}
+_EOM_
+
+}
+
+#############################################################################
+## Setup the ingest pipeline to process read documents
+do_setup_ingest() {
+    ES=$(get_conf es_url)
+    ESPL_NAME=$(get_conf es_pipeline_name)
+    ESINF_NAME=$(get_conf es_inference_name)
+    echo "Setup ingest pipeline '$ESPL_NAME' on: $ES"
+
+    curl -sK "$CONFIG" -X PUT "$ES/_ingest/pipeline/$ESPL_NAME" -d@- <<_EOM_ | jq
+{
+    "description": "Ingest pipeline by $SHNAME",
+    "processors": [
+        {
+            "attachment": {
+                "field": "_data",
+                "target_field": "excerpt",
+                "remove_binary": true,
+                "indexed_chars": -1
+            }
+        },
+        {
+            "rename": {
+                "field": "_from",
+                "target_field": "excerpt.start_page"
+            }
+        },
+        {
+            "rename": {
+                "field": "_to",
+                "target_field": "excerpt.end_page"
+            }
+        },
+        {
+            "rename": {
+                "field": "_title",
+                "target_field": "excerpt.title"
+            }
+        },
+        {
+            "rename": {
+                "field": "_bookmarks",
+                "target_field": "excerpt.bookmarks"
+            }
+        }
+    ]
+}
+_EOM_
+
+}
+
+#############################################################################
+## Setup the index to hold read documents
+## Usage: ... setup_index <Index_Name>
+do_setup_index() {
+    ES=$(get_conf es_url)
+    ESPL_NAME=$(get_conf es_pipeline_name)
+    ESINF_NAME=$(get_conf es_inference_name)
+
+    IDX=${1?Index name required. See: $0 help setup_index}
+    echo "Setup index '$IDX' on: $ES"
+
+    # Test if index already exists
+    curl -sK "$CONFIG" --fail-with-body -I "$ES/$IDX" >/dev/null
+
+    if [ "$?" = "0" ]; then
+        echo "WARN: Index '$IDX' already exists - doing nothing"
+        return
+    fi
+
+    curl -sK "$CONFIG" -X PUT "$ES/$IDX" -d@- <<_EOM_ | jq
+{
+  "settings": {
+    "index": {
+      "routing": {
+        "allocation": {
+          "include": {
+            "_tier_preference": "data_content"
+          }
+        }
+      },
+      "default_pipeline": "$ESPL_NAME",
+      "number_of_shards": "1",
+      "number_of_replicas": "1"
+    }
+  },
+  "mappings": {
+    "properties": {
+      "excerpt": {
+        "properties": {
+          "content": {
+            "type": "text",
+            "copy_to": "semantic_content"
+          },
+          "start_page": {
+            "type": "long"
+          },
+          "end_page": {
+            "type": "long"
+          },
+          "title": {
+            "type": "wildcard",
+            "ignore_above": 256
+          },
+          "bookmarks": {
+            "type": "wildcard",
+            "ignore_above": 256
+          }
+        }
+      },
+      "document": {
+        "properties": {
+          "format": {
+            "type": "keyword",
+            "ignore_above": 128
+          },
+          "filename": {
+            "type": "wildcard",
+            "ignore_above": 256
+          },
+          "excerpt_strategy": {
+            "type": "keyword",
+            "ignore_above": 128
+          }
+        }
+      },
+      "semantic_content": {
+        "type": "semantic_text",
+        "inference_id": "$ESINF_NAME"
+      }
+    }
+  }
+}
+_EOM_
+
+}
+
+#############################################################################
+## Runs all the setup steps in one go:
+##  - setup_inference
+##  - setup_ingest
+##  - setup_index
+## Usage: ... setup_all <Index_Name>
+do_setup_all() {
+    do_setup_inference
+    do_setup_ingest
+    do_setup_index "$@"
+}
+
+
+#############################################################################
+## Remove _any_ named index, including kb indices created by this script
+## Usage: ... remove_index <Index_Name>
+do_remove_index() {
+    ES=$(get_conf es_url)
+    IDX=${1?Index name required. See: $0 help setup_index}
+    echo "Remove index '$IDX' on: $ES"
+
+    confirm_remove index
+
+    curl -sK "$CONFIG" -X DELETE "$ES/$IDX" | jq
+}
+
+#############################################################################
+## Remove the ingest pipeline
+## Usage: ... remove_ingest
+do_remove_ingest() {
+    ES=$(get_conf es_url)
+    ESPL_NAME=$(get_conf es_pipeline_name)
+    echo "Remove ingest pipeline '$ESPL_NAME' on: $ES"
+
+    confirm_remove ingest
+
+    curl -sK "$CONFIG" -X DELETE "$ES/_ingest/pipeline/$ESPL_NAME" | jq
+}
+
+#############################################################################
+## Remove the inference
+## Usage: ... remove_inference
+do_remove_inference() {
+    ES=$(get_conf es_url)
+    ESINF_NAME=$(get_conf es_inference_name)
+    echo "Remove inference '$ESINF_NAME' on: $ES"
+
+    confirm_remove inference
+
+    curl -sK "$CONFIG" -X DELETE "$ES/_inference/$ESINF_NAME" | jq
+}
+
+#############################################################################
+## Runs all the remove steps in one go:
+##  - remove_index
+##  - remove_ingest
+##  - remove_inference
+## Usage: ... remove_all <Index_Name>
+do_remove_all() {
+    confirm_remove everything
+
+    do_remove_index "$@"
+    do_remove_ingest
+    do_remove_inference
+}
+
+#############################################################################
+## Reads PDF file (File_Name) and adds each excerpt as its own doc to the index (Index_Name)
+## Usage: ... read1_pdf <Index_Name> <File_Name>
+do_read1_pdf() {
+    ES="${ES:=$(get_conf es_url)}"
+
+    ESPL_NAME="${ESPL_NAME:=$(get_conf es_pipeline_name)}"
+    IDX=${1?Index required}
+
+    PDF=${2?PDF required}
+    PDF_NAME=$(basename "$PDF")
+
+    PAGE_COUNT=$(qpdf --show-npages "$PDF") || exit 1
+
+    BOOKMARKS=$(qpdf --json "$PDF" | jq '
+      if .outlines == null then [] else
+      .outlines | map({
+        title: .title,
+        level: .level,
+        page: .destpageposfrom1
+      }) end
+    ')
+
+    # Due to 'auto' strategy, we need to reset this every iteration
+    STRATEGY=$(get_conf strategy)
+
+    # Validate strategy
+    case "$STRATEGY" in
+        auto|whole|page|bookmark*) ;;
+        *)
+            echo "ERROR: Invalid excerpt strategy: $STRATEGY"
+            exit 1
+            ;;
+    esac
+
+    _read_pdf_by_${STRATEGY%%[0-9]*}
+}
+
+#############################################################################
+## Iterates over all given PDF files, calling do_read1_pdf on each
+## Usage: ... read_pdf <Index_Name> <File_Name> [File_Name...]
+## e.g.: ... read_pdf kb_index *.pdf
+## Note: Calls read1_pdf on each file (internally)
+do_read_pdf() {
+    if [ $# -lt 2 ]; then
+        echo "Require an index name and at least one or more files"
+        exit 1
+    fi
+
+    local IDX=${1?Index name required. See: $0 help read_pdf}
+    shift
+
+    if [[ -f $IDX ]]; then
+        echo "ERROR: First argument should be an index name, but appears to be a file: $IDX"
+        exit 1
+    fi
+
+    for F in "$@"; do do_read1_pdf "$IDX" "$F"; done
+}
+
+########### PDF read strategies ###########
+
+# Please note: Breaking the PDF in a sensible way proved to be more complicated than first thought.
+# As such this section of the script gets a little more complicated than I wanted
+# Basically _read_pdf_by_* determine a FROM-TO page range for each excerpt
+# Then _ingest_pages is called to extract those pages and add the excerpt as an ES doc
+# We also use some awk-foo to work out all the bookmarks within that range
+
+# Note all these function will reuse variables that should be set in their caller
+
+_read_pdf_by_auto() {
+    PDF_SIZE=$(stat -f %z "$PDF" 2>/dev/null || stat -c %s "$PDF")
+
+    # Sanity checks
+    if [ -z "$PDF_SIZE" ] || [ "$PAGE_COUNT" -lt 1 ]; then
+        echo "WARN: Cannot determine PDF size or page count for '$PDF_NAME', skipping"
+        return
+    fi
+
+    # 1. Whole document if under threshold
+    if [ "$PDF_SIZE" -le "$AUTO_THRESHOLD" ]; then
+        STRATEGY=whole
+        _read_pdf_by_whole
+        return
+    fi
+
+    # Count level-1 headings (bookmarks)
+    HEADING_COUNT=$(jq --argjson lvl 1 '[ .[] | select(.level == $lvl) ] | length' <<<"$BOOKMARKS")
+
+    # 2. Bookmark strategy if average section size fits
+    if [ "$HEADING_COUNT" -gt 0 ]; then
+        AVG_SECTION_BYTES=$((PDF_SIZE / HEADING_COUNT))
+        if [ "$AVG_SECTION_BYTES" -le "$AUTO_THRESHOLD" ]; then
+            STRATEGY=bookmark1
+            _read_pdf_by_bookmark
+            return
+        fi
+    fi
+
+    # Average per-page size
+    AVG_PAGE_BYTES=$((PDF_SIZE / PAGE_COUNT))
+
+    # 3. Page strategy if average page size fits
+    if [ "$AVG_PAGE_BYTES" -le "$AUTO_THRESHOLD" ]; then
+        STRATEGY=page
+        _read_pdf_by_page
+        return
+    fi
+
+    # 4. No safe strategy found
+    echo "WARN: Skipping '$PDF_NAME' – no safe ingest strategy found:"
+    echo "  Threshold:         $AUTO_THRESHOLD bytes"
+    echo "  PDF size:          $PDF_SIZE bytes"
+    echo "  Headings:          $HEADING_COUNT"
+    echo "  Avg section size:  ${AVG_SECTION_BYTES:-N/A} bytes"
+    echo "  Pages:             $PAGE_COUNT"
+    echo "  Avg page size:     $AVG_PAGE_BYTES bytes"
+}
+
+_read_pdf_by_whole() {
+    echo "Read file '$PDF_NAME' into '$IDX' as a whole document on: $ES"
+    _ingest_pages 1 "$PAGE_COUNT" "Whole document"
+}
+
+_read_pdf_by_page() {
+   echo "Read file '$PDF_NAME' into '$IDX' using per page, on: $ES"
+    for PAGE in $(seq 1 "$PAGE_COUNT"); do
+        _ingest_pages "$PAGE" "$PAGE" "Page $PAGE"
+    done
+}
+
+_read_pdf_by_bookmark() {
+    local BKL=${STRATEGY#bookmark}
+
+    echo "Read file '$PDF_NAME' into '$IDX' using Bookmark $BKL on: $ES"
+
+    jq -cr --argjson lvl "$BKL" --argjson max "$PAGE_COUNT" '
+      [ .[] | select(.level == $lvl) ]
+      | to_entries
+      | map({
+          title: .value.title,
+          from: .value.page,
+          to: (if .key+1 < length then .[.key+1].value.page - 1 else $max end)
+        })
+      | .[]
+    ' <<<"$BOOKMARKS" |
+    while IFS= read -r item; do
+        TITLE=$(jq -r '.title' <<<"$item")
+        FROM=$(jq -r '.from' <<<"$item")
+        TO=$(jq -r '.to' <<<"$item")
+        # Skip invalid or empty ranges
+        [ -z "$FROM" ] || [ -z "$TO" ] || [ "$FROM" -gt "$TO" ] && continue
+        _ingest_pages "$FROM" "$TO" "$TITLE"
+    done
+}
+
+_ingest_pages() {
+    local FROM=$1
+    local TO=$2
+    local TITLE=$(sed 's/[^[:print:]]|["]//g' <<<"$3")
+
+    EXC_DATA=$(qpdf "$PDF" --pages "$PDF" "$FROM-$TO" -- - | base64) || exit 1
+
+
+    EXC_BOOKMARKS=$(jq --argjson f "$FROM" --argjson t "$TO" '
+      [ .[] | select(.page >= $f and .page <= $t) | .title ]
+    ' <<<"$BOOKMARKS")
+
+    DOCID=$(url_safe_hash <<<"$PDF_NAME|$STRATEGY|$FROM|$TO|$TITLE")
+
+    curl -sK "$CONFIG" -X POST "$ES/$IDX/_doc/$DOCID?pipeline=$ESPL_NAME" -d@- <<_EOM_ | jq
+{
+  "_data": "$EXC_DATA",
+  "_from": "$FROM",
+  "_to": "$TO",
+  "_title": "$TITLE",
+  "_bookmarks": $EXC_BOOKMARKS,
+  "document": {
+    "type": "PDF",
+    "filename": "$PDF_NAME",
+    "excerpt_strategy": "$STRATEGY"
+  }
+}
+_EOM_
+}
+
+################################ Utils #######################################
+
+get_conf() {
+    if [ ! -f "$CONFIG" ]; then
+        echo "Error: Configuration file '$CONFIG' not found. Please generate it first using the 'config' command." >&2
+        exit 1
+    fi
+    local ITEM=${1? config item required}
+
+    grep -E "^#$ITEM" "$CONFIG" | cut -d'"' -f2
+}
+
+confirm_remove() {
+    # If ESKB_CONFIRM_REMOVE is already 'y', return immediately
+    if [[ "${ESKB_CONFIRM_REMOVE}" == "y" ]]; then
+        return
+    fi
+
+    # Prompt for confirmation
+    read -rp "Please confirm removal ($1) [y/n]: " response
+    case "$response" in
+    [Yy]*)
+        # Setting the variable to avoids all future prompts
+        export ESKB_CONFIRM_REMOVE="y"
+        ;;
+    *)
+        echo "Removal cancelled by user."
+        exit 1
+        ;;
+    esac
+}
+
+url_safe_hash() {
+    openssl sha256 -binary | openssl base64 | tr '+/' '-_' | tr -d '='
+}
+
+########### Boiler plate stuff from here down #############
+# You can reuse this in other bash scripts, nothing specific here
+
+## Shows available commands and their descriptions.
+do_help() {
+    if [ $# -eq 0 ]; then
+        echo "Available commands:"
+        # List all functions that start with do_ as a command
+        for func in $(declare -F | cut -d' ' -f3 | grep '^do_'); do
+            echo " - ${func#do_}"
+        done
+        echo
+        echo "Use '$0 help <command>' to get more information"
+
+    elif [ $# -eq 1 ]; then
+        command="do_$1"
+        if declare -F "$command" > /dev/null; then
+            echo "##### Showing help for: '$1' #####"
+            # Use sed to extract all '##' comments above the function definition (Yes GenAI helped)
+            sed -n '
+            /^##[^#]/{
+                H
+                d
+            }
+            /^\s*}/{
+                x
+                s/.*//
+                h
+            }
+            /^'"$command"' *\(\)/{
+                x
+                s/^\n//
+                p
+                q
+            }
+            ' "$0"
+        else
+            echo "Error: Command '$1' not found."
+        fi
+    else
+        echo "Usage: $0 help [command]"
+    fi
+}
+
+# Main script
+
+for cmd in $REQUIRED_TOOLS; do
+    if ! command -v "$cmd" &>/dev/null; then
+        echo "Needed tool '$cmd' not found, please install it."
+        exit 1
+    fi
+done
+
+if [ $# -eq 0 ]; then
+    echo "Usage: $0 <command> [args]"
+    echo "To list available commands: $0 help"
+    exit 1
+fi
+
+command="do_$1"
+shift
+
+# Check if the function exists
+if declare -F "$command" > /dev/null; then
+    $command "$@"
+else
+    echo "Error: Command '$1' not found. Calling '$0 help' instead:-"
+    do_help
+    exit 1
+fi
